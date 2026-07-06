@@ -16,9 +16,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative"
+
+	"mirage/internal/protocol"
 )
 
 func cmdGUI() {
@@ -57,8 +60,26 @@ func cmdGUI() {
 			statusLbl.SetText("Listen error: " + err.Error())
 			return
 		}
+
+		up, err := net.DialTimeout("tcp", server, 10*time.Second)
+		if err != nil {
+			statusLbl.SetText("Dial error: " + err.Error())
+			ln.Close()
+			return
+		}
+		up.SetDeadline(time.Now().Add(15 * time.Second))
+		sc, err := protocol.ClientHandshake(up, pub, psk, sni)
+		if err != nil {
+			statusLbl.SetText("Handshake error: " + err.Error())
+			up.Close()
+			ln.Close()
+			return
+		}
+		up.SetDeadline(time.Time{})
+		sess := protocol.NewSession(sc)
+
 		listener = ln
-		go runClientListener(ln, server, pub, psk, sni)
+		go runClientListener(ln, sess)
 
 		guiConfig{Server: server, Pub: pubHex, PSK: pskHex, SNI: sni, Listen: listenAddr}.save()
 

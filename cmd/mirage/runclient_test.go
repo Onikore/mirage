@@ -4,6 +4,8 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"mirage/internal/protocol"
 )
 
 // runClientListener must return promptly once its listener is closed — this
@@ -13,10 +15,12 @@ func TestRunClientListenerReturnsWhenListenerClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	c1, _ := net.Pipe()
+	sess := protocol.NewSession(c1)
 
 	done := make(chan struct{})
 	go func() {
-		runClientListener(ln, "127.0.0.1:1", nil, nil, "")
+		runClientListener(ln, sess)
 		close(done)
 	}()
 

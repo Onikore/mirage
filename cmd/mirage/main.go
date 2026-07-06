@@ -10,6 +10,7 @@ package main
 // Скелет: одно tunnel-соединение на один SOCKS5-запрос (mux — TODO).
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"flag"
@@ -186,17 +187,33 @@ func serveConn(c net.Conn, priv noise.DHKey, ps *pskSet, dest string, rc *protoc
 	}
 	c.SetDeadline(time.Time{}) // снять дедлайн для установленной сессии
 
-	target, err := socks.ReadAddr(sc)
+	sess := protocol.NewSession(sc)
+	for {
+		st, payload, err := sess.Accept()
+		if err != nil {
+			return // сессия закрыта (клиент отключился) -- нормальное завершение
+		}
+		go serveStream(st, payload, dest)
+	}
+}
+
+// serveStream дозванивается до цели, закодированной в OPEN-payload стрима,
+// и сшивает поток с ней. Одна горутина на стрим -- несколько запросов через
+// одну и ту же сессию обслуживаются параллельно.
+func serveStream(st *protocol.Stream, payload []byte, dest string) {
+	target, err := socks.ReadAddr(bytes.NewReader(payload))
 	if err != nil {
+		st.Close()
 		return
 	}
 	remote, err := net.DialTimeout("tcp", target, 10*time.Second)
 	if err != nil {
 		log.Printf("dial %s: %v", target, err)
+		st.Close()
 		return
 	}
 	log.Printf("tunnel -> %s", target)
-	relay(sc, remote)
+	relay(st, remote)
 }
 
 // fallback выдаёт зонду настоящий сайт: реиграет уже прочитанные байты и сшивает потоки.
@@ -232,50 +249,49 @@ func cmdClient(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("SOCKS5 on %s -> mirage %s", *listen, *server)
-	runClientListener(ln, *server, pub, psk, *sni)
+
+	up, err := net.DialTimeout("tcp", *server, 10*time.Second)
+	if err != nil {
+		log.Fatal("dial server: ", err)
+	}
+	up.SetDeadline(time.Now().Add(15 * time.Second))
+	sc, err := protocol.ClientHandshake(up, pub, psk, *sni)
+	if err != nil {
+		log.Fatal("handshake: ", err)
+	}
+	up.SetDeadline(time.Time{})
+	sess := protocol.NewSession(sc)
+
+	log.Printf("SOCKS5 on %s -> mirage %s (session established)", *listen, *server)
+	runClientListener(ln, sess)
 }
 
 // runClientListener принимает соединения на ln и обслуживает их до тех пор,
 // пока ln не закроют (например, вызовом ln.Close() из другой горутины —
-// так GUI-клиент реализует «Disconnect»). Возврат из Accept с ошибкой
-// трактуется как «слушатель закрыт, пора остановиться», а не как повод
-// молотить цикл дальше.
-func runClientListener(ln net.Listener, server string, pub, psk []byte, sni string) {
+// так GUI-клиент реализует «Disconnect»). Все локальные SOCKS5-запросы
+// открывают новый Stream на ОДНОЙ и той же уже установленной sess — не
+// дозваниваются и не проводят рукопожатие заново.
+func runClientListener(ln net.Listener, sess *protocol.Session) {
 	for {
 		c, err := ln.Accept()
 		if err != nil {
 			return
 		}
-		go clientConn(c, server, pub, psk, sni)
+		go clientConn(c, sess)
 	}
 }
 
-func clientConn(c net.Conn, server string, pub, psk []byte, sni string) {
+func clientConn(c net.Conn, sess *protocol.Session) {
 	defer c.Close()
 	host, port, err := socks.Accept(c)
 	if err != nil {
 		return
 	}
 
-	up, err := net.DialTimeout("tcp", server, 10*time.Second)
+	st, err := sess.Open(socks.EncodeAddr(host, port))
 	if err != nil {
-		log.Printf("dial server: %v", err)
+		log.Printf("open stream: %v", err)
 		return
 	}
-	up.SetDeadline(time.Now().Add(15 * time.Second))
-	sc, err := protocol.ClientHandshake(up, pub, psk, sni)
-	if err != nil {
-		log.Printf("handshake: %v", err)
-		up.Close()
-		return
-	}
-	up.SetDeadline(time.Time{})
-
-	// первый фрейм — целевой адрес
-	if _, err := sc.Write(socks.EncodeAddr(host, port)); err != nil {
-		sc.Close()
-		return
-	}
-	relay(sc, c)
+	relay(st, c)
 }
