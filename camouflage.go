@@ -60,8 +60,8 @@ func buildMimicClientHello(sni string, ecPub, tag1 []byte) ([]byte, error) {
 	}
 
 	record := make([]byte, 5+len(body))
-	record[0] = 0x16                          // handshake content type
-	record[1], record[2] = 0x03, 0x01         // legacy record version; real TLS1.3 clients send this too
+	record[0] = 0x16                  // handshake content type
+	record[1], record[2] = 0x03, 0x01 // legacy record version; real TLS1.3 clients send this too
 	binary.BigEndian.PutUint16(record[3:5], uint16(len(body)))
 	copy(record[5:], body)
 	return record, nil

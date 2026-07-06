@@ -1,8 +1,8 @@
 package main
 
 // frame.go — потоковый AEAD-канал поверх net.Conn.
-// Каждый Write режется на записи <=16 KiB, каждая запечатывается GCM.
-// Wire записи: len(u16 BE) || ciphertext(len)   ; nonce = счётчик направления.
+// Каждый Write режется на записи <=16 KiB, каждая запечатывается AEAD.
+// Wire записи: len(u16 BE) || ciphertext(len)   ; nonce ведёт сам noise.CipherState.
 //
 // Реализует io.ReadWriteCloser -> совместим с io.Copy для релея.
 //
@@ -10,31 +10,24 @@ package main
 // и подгонять размеры под целевой профиль трафика (см. writeShaped, TODO).
 
 import (
-	"crypto/cipher"
 	"encoding/binary"
 	"io"
 	"net"
+
+	"github.com/flynn/noise"
 )
 
 const maxPlain = 16384
 
 type secureConn struct {
-	conn  net.Conn
-	wAEAD cipher.AEAD
-	rAEAD cipher.AEAD
-	wSeq  uint64
-	rSeq  uint64
-	rbuf  []byte // остаток расшифрованного, ещё не отданный в Read
+	conn net.Conn
+	wCS  *noise.CipherState
+	rCS  *noise.CipherState
+	rbuf []byte // остаток расшифрованного, ещё не отданный в Read
 }
 
-func newSecureConn(conn net.Conn, writeKey, readKey []byte) *secureConn {
-	return &secureConn{
-		conn:  conn,
-		wAEAD: newAEAD(writeKey),
-		rAEAD: newAEAD(readKey),
-		wSeq:  1, // 0 зарезервирован
-		rSeq:  1,
-	}
+func newSecureConn(conn net.Conn, writeCS, readCS *noise.CipherState) *secureConn {
+	return &secureConn{conn: conn, wCS: writeCS, rCS: readCS}
 }
 
 func (s *secureConn) Write(p []byte) (int, error) {
@@ -44,8 +37,10 @@ func (s *secureConn) Write(p []byte) (int, error) {
 		if len(chunk) > maxPlain {
 			chunk = p[:maxPlain]
 		}
-		ct := s.wAEAD.Seal(nil, nonce12(s.wSeq), chunk, nil)
-		s.wSeq++
+		ct, err := s.wCS.Encrypt(nil, nil, chunk)
+		if err != nil {
+			return total, err
+		}
 		frame := make([]byte, 2+len(ct))
 		binary.BigEndian.PutUint16(frame[:2], uint16(len(ct)))
 		copy(frame[2:], ct)
@@ -69,11 +64,10 @@ func (s *secureConn) Read(p []byte) (int, error) {
 		if _, err := io.ReadFull(s.conn, ct); err != nil {
 			return 0, err
 		}
-		pt, err := s.rAEAD.Open(nil, nonce12(s.rSeq), ct, nil)
+		pt, err := s.rCS.Decrypt(nil, nil, ct)
 		if err != nil {
 			return 0, err
 		}
-		s.rSeq++
 		s.rbuf = pt
 	}
 	n := copy(p, s.rbuf)

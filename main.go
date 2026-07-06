@@ -9,7 +9,6 @@ package main
 // Скелет: одно tunnel-соединение на один SOCKS5-запрос (mux — TODO).
 
 import (
-	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/hex"
 	"flag"
@@ -19,6 +18,8 @@ import (
 	"net"
 	"os"
 	"time"
+
+	"github.com/flynn/noise"
 )
 
 func main() {
@@ -40,14 +41,14 @@ func main() {
 }
 
 func cmdKeygen() {
-	priv, err := genKey()
+	kp, err := genKeypair()
 	if err != nil {
 		log.Fatal(err)
 	}
 	psk := make([]byte, 32)
 	rand.Read(psk)
-	fmt.Println("server_priv:", hex.EncodeToString(priv.Bytes()))
-	fmt.Println("server_pub: ", hex.EncodeToString(priv.PublicKey().Bytes()))
+	fmt.Println("server_priv:", hex.EncodeToString(kp.Private))
+	fmt.Println("server_pub: ", hex.EncodeToString(kp.Public))
 	fmt.Println("psk:        ", hex.EncodeToString(psk))
 }
 
@@ -79,7 +80,7 @@ func cmdServer(args []string) {
 	dest := fs.String("dest", "example.com:443", "fallback destination for probers")
 	fs.Parse(args)
 
-	priv, err := curve.NewPrivateKey(mustHex(*privHex))
+	priv, err := dhKeyFromPriv(mustHex(*privHex))
 	if err != nil {
 		log.Fatal("bad priv: ", err)
 	}
@@ -99,7 +100,7 @@ func cmdServer(args []string) {
 	}
 }
 
-func serveConn(c net.Conn, priv *ecdh.PrivateKey, psk []byte, dest string) {
+func serveConn(c net.Conn, priv noise.DHKey, psk []byte, dest string) {
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(15 * time.Second))
 
