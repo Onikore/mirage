@@ -1,4 +1,4 @@
-package main
+package protocol
 
 // frame.go — потоковый AEAD-канал поверх net.Conn.
 // Каждый Write режется на записи <=16 KiB, каждая запечатывается AEAD.
@@ -19,18 +19,18 @@ import (
 
 const maxPlain = 16384
 
-type secureConn struct {
+type SecureConn struct {
 	conn net.Conn
 	wCS  *noise.CipherState
 	rCS  *noise.CipherState
 	rbuf []byte // остаток расшифрованного, ещё не отданный в Read
 }
 
-func newSecureConn(conn net.Conn, writeCS, readCS *noise.CipherState) *secureConn {
-	return &secureConn{conn: conn, wCS: writeCS, rCS: readCS}
+func newSecureConn(conn net.Conn, writeCS, readCS *noise.CipherState) *SecureConn {
+	return &SecureConn{conn: conn, wCS: writeCS, rCS: readCS}
 }
 
-func (s *secureConn) Write(p []byte) (int, error) {
+func (s *SecureConn) Write(p []byte) (int, error) {
 	total := 0
 	for len(p) > 0 {
 		chunk := p
@@ -53,7 +53,7 @@ func (s *secureConn) Write(p []byte) (int, error) {
 	return total, nil
 }
 
-func (s *secureConn) Read(p []byte) (int, error) {
+func (s *SecureConn) Read(p []byte) (int, error) {
 	if len(s.rbuf) == 0 {
 		var hdr [2]byte
 		if _, err := io.ReadFull(s.conn, hdr[:]); err != nil {
@@ -75,4 +75,4 @@ func (s *secureConn) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-func (s *secureConn) Close() error { return s.conn.Close() }
+func (s *SecureConn) Close() error { return s.conn.Close() }

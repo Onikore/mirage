@@ -1,4 +1,4 @@
-package main
+package socks
 
 // addr.go — кодирование целевого адреса (как в SOCKS5).
 // Клиент шлёт это первым сообщением после рукопожатия; сервер туда дозванивается.
@@ -13,7 +13,7 @@ import (
 	"strconv"
 )
 
-func encodeAddr(host string, port uint16) []byte {
+func EncodeAddr(host string, port uint16) []byte {
 	var b []byte
 	if ip := net.ParseIP(host); ip != nil {
 		if ip4 := ip.To4(); ip4 != nil {
@@ -32,7 +32,7 @@ func encodeAddr(host string, port uint16) []byte {
 	return append(b, p...)
 }
 
-func readAddr(r io.Reader) (string, error) {
+func ReadAddr(r io.Reader) (string, error) {
 	var atyp [1]byte
 	if _, err := io.ReadFull(r, atyp[:]); err != nil {
 		return "", err

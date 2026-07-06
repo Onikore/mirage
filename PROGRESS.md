@@ -5,6 +5,57 @@
 
 ---
 
+## 2026-07-06 — Реорганизация в пакеты (cmd/mirage, internal/protocol, internal/socks)
+
+**Что делали:** по запросу — плоская куча из 15 файлов `.go` (+10 тестов)
+в корне разложена по трём пакетам. В Go нельзя просто разложить файлы
+одного пакета по папкам, не сделав их разными пакетами — так что это не
+косметика, а реальное разбиение с экспортом нужных наружу имён.
+
+**Что получилось:**
+- `internal/protocol` — сам протокол: crypto.go, handshake.go,
+  camouflage.go, servhello.go, frame.go, replay.go (всё тесно связано —
+  replayCache используется прямо внутри serverHandshake, поэтому не стал
+  дробить дальше на отдельные пакеты). Экспортировано наружу: `GenKeypair`,
+  `DHKeyFromPriv`, `ClientHandshake`, `ServerHandshake`, `SecureConn`,
+  `ReplayCache`/`NewReplayCache`/`ReplayWindow`. Остальное (сборка
+  ClientHello/ServerHello, внутренний `newHandshakeState`) осталось
+  неэкспортированным — используется только внутри самого пакета.
+- `internal/socks` — socks.go, addr.go: `socks.Accept`, `socks.EncodeAddr`,
+  `socks.ReadAddr` (без "socks."-тавтологии в имени функции).
+- `cmd/mirage` — main.go + GUI (gui_windows.go/gui_other.go/guiconfig.go)
+  + ratelimit.go/pskset.go, которые остались тут же: они используются
+  только оркестрацией сервера в main.go, а не самим протоколом.
+- `ratelimit.go`/`pskset.go`/`guiconfig.go`/`gui_windows.go`/`gui_other.go`
+  не потребовали НИ ОДНОЙ содержательной правки — переехали как есть,
+  меняться было нечему (не пересекались с протоколом напрямую).
+- Полная перепроверка после переноса: `go build ./...`, `go vet ./...`,
+  `gofmt -l .`, весь набор тестов (23 теста, все проходят) — и отдельно
+  `GOOS=windows go vet ./...` + оба .exe (консольный и windowsgui)
+  пересобраны и подтверждены через `file`, что реорганизация не сломала
+  кросс-компиляцию.
+- Заодно поменял авторство: локальный git identity в этом репозитории
+  теперь `Onikore <grishinda10@ya.ru>` (было `Dmitry Grishin`) — по
+  прямому запросу. Вся история переписана (`git filter-repo`/аналог) под
+  этого автора и force-push'нута в `master` и feature-ветку на GitHub;
+  реорганизация коммитится уже под новым именем с самого начала, второй
+  проход переписывания не понадобился.
+
+**Что не получилось / пришлось поправить:**
+- Первый `go vet` после переноса протокольных тестов упал — они звали
+  `genKeypair`/`clientHandshake`/`serverHandshake`/`newReplayCache` по
+  старым (неэкспортированным) именам. Поправил через `sed` с точными
+  границами слов (`\bclientHandshake(` → `ClientHandshake(`), проверив
+  заранее, что паттерн не заденет упоминания тех же имён внутри строк
+  логов и комментариев (у них после имени идёт `:` или `)`, а не `(`).
+- README/DEPLOY.md ссылались на `go build -o mirage .` — точка входа
+  теперь в подпапке, путь сборки поменялся на
+  `go build -o mirage ./cmd/mirage` (и то же для обеих Windows-сборок).
+
+**Коммит:** (будет добавлен после коммита ниже).
+
+---
+
 ## 2026-07-06 — Windows GUI-клиент
 
 **Что делали:** GUI-клиент для Windows (`mirage gui`) — поля для

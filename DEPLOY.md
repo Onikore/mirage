@@ -28,7 +28,7 @@
 
 ```bash
 git clone <repo> && cd mirage
-go build -o mirage .
+go build -o mirage ./cmd/mirage
 
 ./mirage keygen
 # server_priv: <PRIV>   — никому не отдавать

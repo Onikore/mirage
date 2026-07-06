@@ -1,4 +1,4 @@
-package main
+package protocol
 
 // replay.go — анти-replay кэш для msg1: не даёт дважды успешно
 // аутентифицировать один и тот же эфемерный pubkey клиента в пределах окна.
@@ -15,21 +15,21 @@ import (
 	"time"
 )
 
-const replayWindow = 2 * time.Minute
+const ReplayWindow = 2 * time.Minute
 
-type replayCache struct {
+type ReplayCache struct {
 	window time.Duration
 	mu     sync.Mutex
 	seen   map[[32]byte]time.Time
 }
 
-func newReplayCache(window time.Duration) *replayCache {
-	return &replayCache{window: window, seen: make(map[[32]byte]time.Time)}
+func NewReplayCache(window time.Duration) *ReplayCache {
+	return &ReplayCache{window: window, seen: make(map[[32]byte]time.Time)}
 }
 
 // checkAndRemember возвращает true, если ecPub уже встречался в пределах
 // окна (replay). Иначе запоминает его с текущим временем и возвращает false.
-func (c *replayCache) checkAndRemember(ecPub []byte) bool {
+func (c *ReplayCache) checkAndRemember(ecPub []byte) bool {
 	var key [32]byte
 	copy(key[:], ecPub)
 

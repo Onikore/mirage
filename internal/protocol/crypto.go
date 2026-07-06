@@ -1,4 +1,4 @@
-package main
+package protocol
 
 // crypto.go — набор примитивов и генерация ключей для Noise_NKpsk0
 // (см. handshake.go). Само рукопожатие и AEAD-транспорт целиком у
@@ -13,13 +13,13 @@ import (
 
 var cipherSuite = noise.NewCipherSuite(noise.DH25519, noise.CipherAESGCM, noise.HashSHA256)
 
-func genKeypair() (noise.DHKey, error) {
+func GenKeypair() (noise.DHKey, error) {
 	return cipherSuite.GenerateKeypair(rand.Reader)
 }
 
-// dhKeyFromPriv восстанавливает пару ключей из сырого 32-байтового
+// DHKeyFromPriv восстанавливает пару ключей из сырого 32-байтового
 // приватного ключа (как выдаёт keygen) — публичный выводится из приватного.
-func dhKeyFromPriv(priv []byte) (noise.DHKey, error) {
+func DHKeyFromPriv(priv []byte) (noise.DHKey, error) {
 	pub, err := curve25519.X25519(priv, curve25519.Basepoint)
 	if err != nil {
 		return noise.DHKey{}, err

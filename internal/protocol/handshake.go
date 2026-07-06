@@ -1,4 +1,4 @@
-package main
+package protocol
 
 // handshake.go — рукопожатие Noise_NKpsk0 поверх X25519 (github.com/flynn/noise).
 //
@@ -42,8 +42,8 @@ func newHandshakeState(initiator bool, psk []byte, staticKP noise.DHKey, peerSta
 	})
 }
 
-// clientHandshake выполняет рукопожатие и возвращает защищённый канал.
-func clientHandshake(conn net.Conn, serverPub, psk []byte, sni string) (*secureConn, error) {
+// ClientHandshake выполняет рукопожатие и возвращает защищённый канал.
+func ClientHandshake(conn net.Conn, serverPub, psk []byte, sni string) (*SecureConn, error) {
 	hs, err := newHandshakeState(true, psk, noise.DHKey{}, serverPub)
 	if err != nil {
 		return nil, err
@@ -76,14 +76,14 @@ func clientHandshake(conn net.Conn, serverPub, psk []byte, sni string) (*secureC
 	return newSecureConn(conn, csC2S, csS2C), nil
 }
 
-// serverHandshake пытается принять клиента. Всегда возвращает consumed —
+// ServerHandshake пытается принять клиента. Всегда возвращает consumed —
 // байты, уже прочитанные из conn, чтобы caller мог их переиграть в fallback.
 // psks — набор одновременно валидных psk (см. pskset.go): пробуем каждый по
 // очереди, пока один не подойдёт — так старый и новый psk работают
 // параллельно на время ротации. rc — общий на процесс анти-replay кэш
 // (см. replay.go); проверяется только после успешной аутентификации, чтобы
 // мусор его не засорял.
-func serverHandshake(conn net.Conn, staticKP noise.DHKey, psks [][]byte, rc *replayCache) (sc *secureConn, consumed []byte, err error) {
+func ServerHandshake(conn net.Conn, staticKP noise.DHKey, psks [][]byte, rc *ReplayCache) (sc *SecureConn, consumed []byte, err error) {
 	ecPub, tag1, sessionID, consumed, perr := parseMimicClientHello(conn)
 	if perr != nil {
 		return nil, consumed, perr

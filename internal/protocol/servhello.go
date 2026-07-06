@@ -1,4 +1,4 @@
-package main
+package protocol
 
 // servhello.go — обёртка server->client половины рукопожатия (msg2) в
 // минимальный, спецификационно корректный TLS 1.3 ServerHello + одна

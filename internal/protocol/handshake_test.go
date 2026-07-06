@@ -1,4 +1,4 @@
-package main
+package protocol
 
 import (
 	"bytes"
@@ -12,7 +12,7 @@ import (
 )
 
 func TestHandshakeRoundTrip(t *testing.T) {
-	serverKP, err := genKeypair()
+	serverKP, err := GenKeypair()
 	if err != nil {
 		t.Fatalf("genKeypair: %v", err)
 	}
@@ -22,16 +22,16 @@ func TestHandshakeRoundTrip(t *testing.T) {
 	c1, c2 := net.Pipe()
 
 	type clientResult struct {
-		sc  *secureConn
+		sc  *SecureConn
 		err error
 	}
 	clientCh := make(chan clientResult, 1)
 	go func() {
-		sc, err := clientHandshake(c1, serverKP.Public, psk, "www.google.com")
+		sc, err := ClientHandshake(c1, serverKP.Public, psk, "www.google.com")
 		clientCh <- clientResult{sc, err}
 	}()
 
-	serverSC, consumed, err := serverHandshake(c2, serverKP, [][]byte{psk}, newReplayCache(time.Minute))
+	serverSC, consumed, err := ServerHandshake(c2, serverKP, [][]byte{psk}, NewReplayCache(time.Minute))
 	if err != nil {
 		t.Fatalf("serverHandshake: %v (consumed %d bytes)", err, len(consumed))
 	}
@@ -63,7 +63,7 @@ func TestHandshakeRoundTrip(t *testing.T) {
 }
 
 func TestServerHandshakeRejectsBadPSK(t *testing.T) {
-	serverKP, err := genKeypair()
+	serverKP, err := GenKeypair()
 	if err != nil {
 		t.Fatalf("genKeypair: %v", err)
 	}
@@ -75,11 +75,11 @@ func TestServerHandshakeRejectsBadPSK(t *testing.T) {
 	c1, c2 := net.Pipe()
 	done := make(chan struct{})
 	go func() {
-		clientHandshake(c1, serverKP.Public, badPSK, "www.google.com")
+		ClientHandshake(c1, serverKP.Public, badPSK, "www.google.com")
 		close(done)
 	}()
 
-	_, consumed, err := serverHandshake(c2, serverKP, [][]byte{goodPSK}, newReplayCache(time.Minute))
+	_, consumed, err := ServerHandshake(c2, serverKP, [][]byte{goodPSK}, NewReplayCache(time.Minute))
 	if err == nil {
 		t.Fatal("expected error for bad psk")
 	}
@@ -93,7 +93,7 @@ func TestServerHandshakeRejectsBadPSK(t *testing.T) {
 }
 
 func TestServerHandshakeRejectsReplay(t *testing.T) {
-	serverKP, err := genKeypair()
+	serverKP, err := GenKeypair()
 	if err != nil {
 		t.Fatalf("genKeypair: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestServerHandshakeRejectsReplay(t *testing.T) {
 		t.Fatalf("buildMimicClientHello: %v", err)
 	}
 
-	rc := newReplayCache(time.Minute)
+	rc := NewReplayCache(time.Minute)
 
 	// Первая попытка с этими байтами должна пройти.
 	c1, c2 := net.Pipe()
@@ -124,7 +124,7 @@ func TestServerHandshakeRejectsReplay(t *testing.T) {
 		parseMimicServerHello(c1) // разблокировать conn.Write(mimic2) на сервере
 		close(done)
 	}()
-	if _, _, err := serverHandshake(c2, serverKP, [][]byte{psk}, rc); err != nil {
+	if _, _, err := ServerHandshake(c2, serverKP, [][]byte{psk}, rc); err != nil {
 		t.Fatalf("first attempt: expected success, got %v", err)
 	}
 	c1.Close()
@@ -138,7 +138,7 @@ func TestServerHandshakeRejectsReplay(t *testing.T) {
 		c3.Write(mimic)
 		close(done2)
 	}()
-	_, consumed, err := serverHandshake(c4, serverKP, [][]byte{psk}, rc)
+	_, consumed, err := ServerHandshake(c4, serverKP, [][]byte{psk}, rc)
 	if err == nil {
 		t.Fatal("expected replay to be rejected")
 	}
@@ -151,7 +151,7 @@ func TestServerHandshakeRejectsReplay(t *testing.T) {
 }
 
 func TestServerHandshakeAcceptsAnyConfiguredPSK(t *testing.T) {
-	serverKP, err := genKeypair()
+	serverKP, err := GenKeypair()
 	if err != nil {
 		t.Fatalf("genKeypair: %v", err)
 	}
@@ -166,11 +166,11 @@ func TestServerHandshakeAcceptsAnyConfiguredPSK(t *testing.T) {
 			c1, c2 := net.Pipe()
 			clientCh := make(chan error, 1)
 			go func() {
-				_, err := clientHandshake(c1, serverKP.Public, clientPSK, "www.google.com")
+				_, err := ClientHandshake(c1, serverKP.Public, clientPSK, "www.google.com")
 				clientCh <- err
 			}()
 
-			if _, _, err := serverHandshake(c2, serverKP, psks, newReplayCache(time.Minute)); err != nil {
+			if _, _, err := ServerHandshake(c2, serverKP, psks, NewReplayCache(time.Minute)); err != nil {
 				t.Fatalf("serverHandshake: %v", err)
 			}
 			if err := <-clientCh; err != nil {
@@ -183,7 +183,7 @@ func TestServerHandshakeAcceptsAnyConfiguredPSK(t *testing.T) {
 }
 
 func TestServerHandshakeRejectsGarbage(t *testing.T) {
-	serverKP, err := genKeypair()
+	serverKP, err := GenKeypair()
 	if err != nil {
 		t.Fatalf("genKeypair: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestServerHandshakeRejectsGarbage(t *testing.T) {
 		close(done)
 	}()
 
-	_, consumed, err := serverHandshake(c2, serverKP, [][]byte{psk}, newReplayCache(time.Minute))
+	_, consumed, err := ServerHandshake(c2, serverKP, [][]byte{psk}, NewReplayCache(time.Minute))
 	if err == nil {
 		t.Fatal("expected error for garbage input")
 	}

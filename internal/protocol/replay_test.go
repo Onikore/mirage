@@ -1,4 +1,4 @@
-package main
+package protocol
 
 import (
 	"crypto/rand"
@@ -7,7 +7,7 @@ import (
 )
 
 func TestReplayCacheDetectsDuplicate(t *testing.T) {
-	rc := newReplayCache(time.Minute)
+	rc := NewReplayCache(time.Minute)
 	ecPub := make([]byte, 32)
 	rand.Read(ecPub)
 
@@ -20,7 +20,7 @@ func TestReplayCacheDetectsDuplicate(t *testing.T) {
 }
 
 func TestReplayCacheDistinctKeysIndependent(t *testing.T) {
-	rc := newReplayCache(time.Minute)
+	rc := NewReplayCache(time.Minute)
 	a := make([]byte, 32)
 	b := make([]byte, 32)
 	rand.Read(a)
@@ -35,7 +35,7 @@ func TestReplayCacheDistinctKeysIndependent(t *testing.T) {
 }
 
 func TestReplayCacheExpiresAfterWindow(t *testing.T) {
-	rc := newReplayCache(20 * time.Millisecond)
+	rc := NewReplayCache(20 * time.Millisecond)
 	ecPub := make([]byte, 32)
 	rand.Read(ecPub)
 

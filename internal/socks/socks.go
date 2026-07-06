@@ -1,4 +1,4 @@
-package main
+package socks
 
 // socks.go — минимальный SOCKS5 (no-auth, только CONNECT) как локальный вход клиента.
 
@@ -10,8 +10,8 @@ import (
 	"strconv"
 )
 
-// socksAccept разбирает SOCKS5 CONNECT и возвращает host, port.
-func socksAccept(c net.Conn) (string, uint16, error) {
+// Accept разбирает SOCKS5 CONNECT и возвращает host, port.
+func Accept(c net.Conn) (string, uint16, error) {
 	// greeting: ver, nmethods, methods...
 	head := make([]byte, 2)
 	if _, err := io.ReadFull(c, head); err != nil {

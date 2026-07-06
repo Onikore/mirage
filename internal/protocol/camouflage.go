@@ -1,4 +1,4 @@
-package main
+package protocol
 
 // camouflage.go — обёртка client->server рукопожатия в мимикрированный
 // TLS 1.3 ClientHello (fingerprint Chrome, через uTLS), чтобы первый байт

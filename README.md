@@ -15,7 +15,7 @@ flynn/noise (аудированная реализация Noise Protocol Framew
 ## Сборка
 
 ```
-go build -o mirage .
+go build -o mirage ./cmd/mirage
 ```
 
 ### Windows GUI
@@ -27,11 +27,11 @@ go build -o mirage .
 ```bash
 # mirage.exe — консольная подсистема, для запуска из cmd/PowerShell
 # (keygen/server/client, видимый лог)
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o mirage.exe .
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o mirage.exe ./cmd/mirage
 
 # mirage-gui.exe — windowsgui подсистема, для запуска двойным кликом
 # (без мелькающей консоли позади окна)
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-H windowsgui" -o mirage-gui.exe .
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-H windowsgui" -o mirage-gui.exe ./cmd/mirage
 ```
 
 Обе сборки — один и тот же бинарник с одними и теми же подкомандами;
@@ -92,27 +92,44 @@ curl --socks5-hostname 127.0.0.1:1080 https://blocked.example/
                                                         (плохой auth) └──> dest (реальный сайт)
 ```
 
-- `crypto.go`    — набор примитивов (X25519 + AES-256-GCM + SHA-256) и
+Три пакета вместо одной кучи файлов в корне:
+
+```
+cmd/mirage/            — точка входа: CLI-подкоманды + Windows GUI
+internal/protocol/     — сам протокол: Noise-рукопожатие + TLS-камуфляж + AEAD-фреймы
+internal/socks/        — SOCKS5-вход клиента
+```
+
+**`internal/protocol/`** (пакет `protocol`)
+- `crypto.go`     — набор примитивов (X25519 + AES-256-GCM + SHA-256) и
   генерация ключей для flynn/noise
-- `handshake.go` — рукопожатие Noise_NKpsk0: forward secrecy (эфемерали),
-  PSK вплетён в первое же сообщение (auth клиента + анти-зонд)
-- `replay.go`     — анти-replay кэш эфемеральных pubkey клиентов (окно 2 мин)
-- `ratelimit.go`  — per-IP token-bucket лимит попыток подключения
-- `pskset.go`     — набор одновременно валидных psk + горячая
-  перезагрузка списка по SIGHUP (ротация без остановки сервера)
+- `handshake.go`  — рукопожатие Noise_NKpsk0: forward secrecy (эфемерали),
+  PSK вплетён в первое же сообщение (auth клиента + анти-зонд).
+  Экспортирует `ClientHandshake`/`ServerHandshake`/`SecureConn`.
+- `replay.go`     — анти-replay кэш эфемеральных pubkey клиентов (окно 2
+  мин). Экспортирует `ReplayCache`/`NewReplayCache`/`ReplayWindow`.
 - `camouflage.go` — упаковка/разбор client->server рукопожатия как
   мимикрированного TLS ClientHello (uTLS, Chrome-фингерпринт)
 - `servhello.go`  — упаковка/разбор server->client половины как
   минимального спецификационно корректного TLS 1.3 ServerHello
-- `frame.go`     — потоковый AEAD-канал (io.ReadWriteCloser) поверх
-  `noise.CipherState`, хук для shaping
-- `addr.go`      — кодирование целевого адреса
-- `socks.go`     — SOCKS5 вход
-- `main.go`      — keygen / server / client / gui
+- `frame.go`      — потоковый AEAD-канал (`SecureConn`, io.ReadWriteCloser)
+  поверх `noise.CipherState`, хук для shaping
+
+**`internal/socks/`** (пакет `socks`)
+- `socks.go` — SOCKS5-вход (`socks.Accept`)
+- `addr.go`  — кодирование целевого адреса (`socks.EncodeAddr`/`socks.ReadAddr`)
+
+**`cmd/mirage/`** (пакет `main`)
+- `main.go`        — keygen / server / client / gui; per-IP rate-limit
+  (`ratelimit.go`) и набор psk с ротацией (`pskset.go`) живут здесь же —
+  это чисто CLI/server-оркестрация, не часть протокола
+- `ratelimit.go`   — per-IP token-bucket лимит попыток подключения
+- `pskset.go`      — набор одновременно валидных psk + горячая
+  перезагрузка списка по SIGHUP (ротация без остановки сервера)
 - `gui_windows.go` — GUI-клиент (только Windows): поля + Connect/Disconnect
   поверх того же `runClientListener`, что и `mirage client`
-- `gui_other.go`  — заглушка `cmdGUI` для не-Windows сборок
-- `guiconfig.go`  — сохранение/загрузка последних введённых в GUI полей
+- `gui_other.go`   — заглушка `cmdGUI` для не-Windows сборок
+- `guiconfig.go`   — сохранение/загрузка последних введённых в GUI полей
 
 ## Что дальше (по приоритету)
 

@@ -23,6 +23,9 @@ import (
 	"time"
 
 	"github.com/flynn/noise"
+
+	"mirage/internal/protocol"
+	"mirage/internal/socks"
 )
 
 func main() {
@@ -49,7 +52,7 @@ func main() {
 }
 
 func cmdKeygen() {
-	kp, err := genKeypair()
+	kp, err := protocol.GenKeypair()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -89,7 +92,7 @@ func cmdServer(args []string) {
 	dest := fs.String("dest", "example.com:443", "fallback destination for probers")
 	fs.Parse(args)
 
-	priv, err := dhKeyFromPriv(mustHex(*privHex))
+	priv, err := protocol.DHKeyFromPriv(mustHex(*privHex))
 	if err != nil {
 		log.Fatal("bad priv: ", err)
 	}
@@ -97,7 +100,7 @@ func cmdServer(args []string) {
 	if *pskFile != "" {
 		watchPSKFileReload(*pskFile, *pskHex, ps)
 	}
-	rc := newReplayCache(replayWindow)
+	rc := protocol.NewReplayCache(protocol.ReplayWindow)
 	il := newIPLimiter()
 
 	ln, err := net.Listen("tcp", *listen)
@@ -161,7 +164,7 @@ func watchPSKFileReload(pskFile, pskHex string, ps *pskSet) {
 	}()
 }
 
-func serveConn(c net.Conn, priv noise.DHKey, ps *pskSet, dest string, rc *replayCache, il *ipLimiter) {
+func serveConn(c net.Conn, priv noise.DHKey, ps *pskSet, dest string, rc *protocol.ReplayCache, il *ipLimiter) {
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(15 * time.Second))
 
@@ -175,7 +178,7 @@ func serveConn(c net.Conn, priv noise.DHKey, ps *pskSet, dest string, rc *replay
 		return
 	}
 
-	sc, consumed, err := serverHandshake(c, priv, ps.Load(), rc)
+	sc, consumed, err := protocol.ServerHandshake(c, priv, ps.Load(), rc)
 	if err != nil {
 		// зонд/мусор -> прозрачный проброс на реальный сайт, переигрывая прочитанное
 		fallback(c, consumed, dest)
@@ -183,7 +186,7 @@ func serveConn(c net.Conn, priv noise.DHKey, ps *pskSet, dest string, rc *replay
 	}
 	c.SetDeadline(time.Time{}) // снять дедлайн для установленной сессии
 
-	target, err := readAddr(sc)
+	target, err := socks.ReadAddr(sc)
 	if err != nil {
 		return
 	}
@@ -250,7 +253,7 @@ func runClientListener(ln net.Listener, server string, pub, psk []byte, sni stri
 
 func clientConn(c net.Conn, server string, pub, psk []byte, sni string) {
 	defer c.Close()
-	host, port, err := socksAccept(c)
+	host, port, err := socks.Accept(c)
 	if err != nil {
 		return
 	}
@@ -261,7 +264,7 @@ func clientConn(c net.Conn, server string, pub, psk []byte, sni string) {
 		return
 	}
 	up.SetDeadline(time.Now().Add(15 * time.Second))
-	sc, err := clientHandshake(up, pub, psk, sni)
+	sc, err := protocol.ClientHandshake(up, pub, psk, sni)
 	if err != nil {
 		log.Printf("handshake: %v", err)
 		up.Close()
@@ -270,7 +273,7 @@ func clientConn(c net.Conn, server string, pub, psk []byte, sni string) {
 	up.SetDeadline(time.Time{})
 
 	// первый фрейм — целевой адрес
-	if _, err := sc.Write(encodeAddr(host, port)); err != nil {
+	if _, err := sc.Write(socks.EncodeAddr(host, port)); err != nil {
 		sc.Close()
 		return
 	}
