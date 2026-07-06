@@ -92,6 +92,7 @@ func cmdServer(args []string) {
 	pskHex := fs.String("psk", "", "pre-shared key (hex), single-key mode")
 	pskFile := fs.String("psk-file", "", "file with one hex psk per line; supports multiple simultaneously-valid keys and SIGHUP reload (for zero-downtime rotation)")
 	dest := fs.String("dest", "example.com:443", "fallback destination for probers")
+	padding := fs.Bool("padding", false, "add periodic random-size padding frames to obscure session timing/size patterns (generic obfuscation, not a precise protocol-profile match)")
 	fs.Parse(args)
 
 	priv, err := protocol.DHKeyFromPriv(mustHex(*privHex))
@@ -115,7 +116,7 @@ func cmdServer(args []string) {
 		if err != nil {
 			continue
 		}
-		go serveConn(c, priv, ps, *dest, rc, il)
+		go serveConn(c, priv, ps, *dest, rc, il, *padding)
 	}
 }
 
@@ -166,7 +167,7 @@ func watchPSKFileReload(pskFile, pskHex string, ps *pskSet) {
 	}()
 }
 
-func serveConn(c net.Conn, priv noise.DHKey, ps *pskSet, dest string, rc *protocol.ReplayCache, il *ipLimiter) {
+func serveConn(c net.Conn, priv noise.DHKey, ps *pskSet, dest string, rc *protocol.ReplayCache, il *ipLimiter, padding bool) {
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(15 * time.Second))
 
@@ -189,6 +190,9 @@ func serveConn(c net.Conn, priv noise.DHKey, ps *pskSet, dest string, rc *protoc
 	c.SetDeadline(time.Time{}) // снять дедлайн для установленной сессии
 
 	sess := protocol.NewSession(sc)
+	if padding {
+		sess.StartPadding(1*time.Second, 5*time.Second, 32, 256)
+	}
 	for {
 		st, payload, err := sess.Accept()
 		if err != nil {
@@ -241,6 +245,7 @@ func cmdClient(args []string) {
 	pubHex := fs.String("pub", "", "server public key (hex)")
 	pskHex := fs.String("psk", "", "pre-shared key (hex)")
 	sni := fs.String("sni", "www.google.com", "SNI hostname to wear in the disguised ClientHello")
+	padding := fs.Bool("padding", false, "add periodic random-size padding frames to obscure session timing/size patterns (generic obfuscation, not a precise protocol-profile match)")
 	fs.Parse(args)
 
 	pub := mustHex(*pubHex)
@@ -262,6 +267,9 @@ func cmdClient(args []string) {
 	}
 	up.SetDeadline(time.Time{})
 	sess := protocol.NewSession(sc)
+	if *padding {
+		sess.StartPadding(1*time.Second, 5*time.Second, 32, 256)
+	}
 
 	log.Printf("SOCKS5 on %s -> mirage %s (session established)", *listen, *server)
 	runClientListener(ln, sess)
