@@ -40,6 +40,17 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-H windowsgui" -o mir
 сразу открывает GUI (`gui` подкоманда), `mirage.exe` без GUI-флага ведёт
 себя как обычный CLI.
 
+`cmd/mirage/rsrc_windows_amd64.syso` — скомпилированный манифест
+(`mirage.exe.manifest`), заявляющий зависимость от Common-Controls v6;
+Go-линкер подхватывает `.syso` из папки пакета автоматически, без
+дополнительных флагов сборки. Без него `lxn/walk` падает при старте с
+`TTM_ADDTOOL failed` (Windows грузит устаревший comctl32 v5). Если
+манифест меняется — пересобрать `.syso` через
+`rsrc -manifest cmd/mirage/mirage.exe.manifest -o cmd/mirage/rsrc_windows_amd64.syso -arch amd64`
+(`go install github.com/akavel/rsrc@latest`); стандартный MS
+`cvtres.exe` не подходит — отдаёт big-obj формат, который линкер Go
+отклоняет (`sectnum < 0`).
+
 ## Запуск (локальный тест)
 
 ```

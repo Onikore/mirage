@@ -3,7 +3,9 @@ package main
 import "testing"
 
 func TestGUIConfigSaveLoadRoundTrip(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // os.UserConfigDir() reads this on Linux
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir) // os.UserConfigDir() reads this on Linux
+	t.Setenv("AppData", dir)         // os.UserConfigDir() reads this on Windows
 
 	cfg := guiConfig{
 		Server: "example.com:8443",
@@ -26,7 +28,9 @@ func TestGUIConfigSaveLoadRoundTrip(t *testing.T) {
 }
 
 func TestLoadGUIConfigMissingFileReturnsZeroValue(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("AppData", dir)
 
 	got, err := loadGUIConfig()
 	if err != nil {

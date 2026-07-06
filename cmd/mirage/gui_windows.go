@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"time"
 
 	"github.com/lxn/walk"
@@ -105,7 +106,7 @@ func cmdGUI() {
 		connectBtn.SetText("Connect")
 	}
 
-	MainWindow{
+	_, err := MainWindow{
 		Title:  "Mirage",
 		Size:   Size{Width: 440, Height: 300},
 		Layout: VBox{},
@@ -139,6 +140,13 @@ func cmdGUI() {
 			Label{AssignTo: &statusLbl, Text: "Idle"},
 		},
 	}.Run()
+	if err != nil {
+		// Окно не создалось (например, нет манифеста Common-Controls v6 в
+		// exe) — виджеты не назначены, дальше вызывать disconnect() нельзя,
+		// упадёт на nil-указателе.
+		fmt.Fprintln(os.Stderr, "mirage gui: window creation failed:", err)
+		return
+	}
 
 	disconnect() // окно закрыли — прибрать слушатель за собой
 }
