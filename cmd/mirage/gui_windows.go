@@ -15,6 +15,7 @@ package main
 import (
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
 	"time"
 
@@ -38,6 +39,7 @@ func cmdGUI() {
 		connectBtn                                        *walk.PushButton
 		statusLbl                                         *walk.Label
 		listener                                          net.Listener
+		sessConn                                          io.Closer // sc (SecureConn) — закрывает сессию на Disconnect
 	)
 
 	connect := func() {
@@ -79,6 +81,7 @@ func cmdGUI() {
 		sess := protocol.NewSession(sc)
 
 		listener = ln
+		sessConn = sc
 		go runClientListener(ln, sess)
 
 		guiConfig{Server: server, Pub: pubHex, PSK: pskHex, SNI: sni, Listen: listenAddr}.save()
@@ -91,6 +94,12 @@ func cmdGUI() {
 		if listener != nil {
 			listener.Close()
 			listener = nil
+		}
+		if sessConn != nil {
+			// закрывает sc -> readLoop сессии получает ошибку чтения и сам
+			// завершается (Session.Close нет — не нужен, см. mux.go)
+			sessConn.Close()
+			sessConn = nil
 		}
 		statusLbl.SetText("Idle")
 		connectBtn.SetText("Connect")
