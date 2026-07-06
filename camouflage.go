@@ -25,6 +25,9 @@ import (
 const maxMimicHelloLen = 8192
 
 func buildMimicClientHello(sni string, ecPub, tag1 []byte) ([]byte, error) {
+	if len(ecPub) != 32 || len(tag1) != 16 {
+		return nil, errors.New("mirage: buildMimicClientHello: ecPub must be 32 bytes, tag1 must be 16 bytes")
+	}
 	uconn := tls.UClient(nil, &tls.Config{ServerName: sni}, tls.HelloChrome_Auto)
 	if err := uconn.BuildHandshakeState(); err != nil {
 		return nil, err

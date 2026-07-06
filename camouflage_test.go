@@ -33,12 +33,13 @@ func TestMimicClientHelloRoundTrip(t *testing.T) {
 }
 
 func TestParseMimicClientHelloGarbage(t *testing.T) {
-	_, _, consumed, err := parseMimicClientHello(bytes.NewReader([]byte("GET / HTTP/1.1\r\n")))
+	in := []byte("GET / HTTP/1.1\r\n")
+	_, _, consumed, err := parseMimicClientHello(bytes.NewReader(in))
 	if err == nil {
 		t.Fatal("expected error for non-TLS input")
 	}
-	if len(consumed) == 0 {
-		t.Fatal("expected consumed bytes for fallback replay")
+	if !bytes.Equal(consumed, in[:5]) {
+		t.Errorf("consumed = % x, want exactly the 5-byte record header % x", consumed, in[:5])
 	}
 }
 
