@@ -86,6 +86,7 @@ func cmdServer(args []string) {
 	}
 	psk := mustHex(*pskHex)
 	rc := newReplayCache(replayWindow)
+	il := newIPLimiter()
 
 	ln, err := net.Listen("tcp", *listen)
 	if err != nil {
@@ -97,13 +98,23 @@ func cmdServer(args []string) {
 		if err != nil {
 			continue
 		}
-		go serveConn(c, priv, psk, *dest, rc)
+		go serveConn(c, priv, psk, *dest, rc, il)
 	}
 }
 
-func serveConn(c net.Conn, priv noise.DHKey, psk []byte, dest string, rc *replayCache) {
+func serveConn(c net.Conn, priv noise.DHKey, psk []byte, dest string, rc *replayCache, il *ipLimiter) {
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(15 * time.Second))
+
+	host, _, err := net.SplitHostPort(c.RemoteAddr().String())
+	if err != nil {
+		host = c.RemoteAddr().String()
+	}
+	if !il.allow(host) {
+		// превышен лимит попыток с этого IP -> прямиком в fallback, без крипто-работы
+		fallback(c, nil, dest)
+		return
+	}
 
 	sc, consumed, err := serverHandshake(c, priv, psk, rc)
 	if err != nil {
