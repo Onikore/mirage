@@ -7,6 +7,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestDroppedOpenIsNotRegistered guards against a leak found in final
@@ -160,5 +161,36 @@ func TestStreamCloseYieldsEOF(t *testing.T) {
 	buf := make([]byte, 1)
 	if _, err := st.Read(buf); err != io.EOF {
 		t.Errorf("Read after close: err=%v, want io.EOF", err)
+	}
+}
+
+func TestPaddingFramesNeverReachApplicationStream(t *testing.T) {
+	c1, c2 := net.Pipe()
+	client := NewSession(c1)
+	server := NewSession(c2)
+	server.StartPadding(1*time.Millisecond, 3*time.Millisecond, 8, 16)
+	client.StartPadding(1*time.Millisecond, 3*time.Millisecond, 8, 16)
+
+	clientSt, err := client.Open([]byte("target"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	serverSt, _, err := server.Accept()
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+
+	want := []byte("real application data")
+	go func() {
+		time.Sleep(20 * time.Millisecond) // let a few padding frames interleave first
+		serverSt.Write(want)
+	}()
+
+	buf := make([]byte, len(want))
+	if _, err := io.ReadFull(clientSt, buf); err != nil {
+		t.Fatalf("ReadFull: %v", err)
+	}
+	if !bytes.Equal(buf, want) {
+		t.Fatalf("got %q, want %q -- a padding frame's bytes leaked into the application stream", buf, want)
 	}
 }

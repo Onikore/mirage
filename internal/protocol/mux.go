@@ -40,14 +40,17 @@ package protocol
 import (
 	"encoding/binary"
 	"io"
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const (
-	frameOpen  byte = 1
-	frameData  byte = 2
-	frameClose byte = 3
+	frameOpen    byte = 1
+	frameData    byte = 2
+	frameClose   byte = 3
+	framePadding byte = 4 // шум для обфускации трафика; id всегда 0, payload игнорируется получателем
 )
 
 // maxFramePayload — payload-длина кадра кодируется u16, больше физически
@@ -152,6 +155,10 @@ func (s *Session) readLoop() {
 			if st != nil {
 				st.closeReadCh()
 			}
+		case framePadding:
+			// обфускация трафика -- байты уже вычитаны общей логикой выше
+			// (io.ReadFull для payload), больше ничего делать не нужно: это
+			// и есть "отбросить".
 		}
 	}
 }
@@ -213,6 +220,43 @@ func (s *Session) shutdown(err error) {
 		st.closeReadCh() // безопасно: shutdown вызывается только из readLoop
 	}
 	s.mu.Unlock()
+}
+
+// writePadding отправляет один кадр-шум размера n. Содержимое (нули) не
+// имеет значения: writeFrame пишет в *SecureConn, а AEAD-шифротекст
+// неотличим от случайного независимо от plaintext -- пассивному
+// наблюдателю снаружи в любом случае виден только шифротекст. Значение
+// имеют только размер и тайминг кадра, не его содержимое.
+func (s *Session) writePadding(n int) error {
+	return s.writeFrame(0, framePadding, make([]byte, n))
+}
+
+// StartPadding запускает фоновую заливку случайных padding-кадров: после
+// случайного джиттера в [minInterval, maxInterval) шлёт один кадр
+// случайного размера в [minSize, maxSize), повторяет, пока сессия не
+// закрылась. Не вызывается автоматически из NewSession — включается
+// явно вызывающим кодом (см. cmd/mirage/main.go, флаг -padding).
+func (s *Session) StartPadding(minInterval, maxInterval time.Duration, minSize, maxSize int) {
+	go func() {
+		for {
+			d := minInterval
+			if maxInterval > minInterval {
+				d += time.Duration(rand.Int64N(int64(maxInterval - minInterval)))
+			}
+			select {
+			case <-time.After(d):
+			case <-s.closed:
+				return
+			}
+			n := minSize
+			if maxSize > minSize {
+				n += rand.IntN(maxSize - minSize)
+			}
+			if s.writePadding(n) != nil {
+				return // сессия, судя по всему, умерла -- цикл сам завершится
+			}
+		}
+	}()
 }
 
 // Stream — один логический канал внутри Session; реализует
