@@ -85,6 +85,7 @@ func cmdServer(args []string) {
 		log.Fatal("bad priv: ", err)
 	}
 	psk := mustHex(*pskHex)
+	rc := newReplayCache(replayWindow)
 
 	ln, err := net.Listen("tcp", *listen)
 	if err != nil {
@@ -96,15 +97,15 @@ func cmdServer(args []string) {
 		if err != nil {
 			continue
 		}
-		go serveConn(c, priv, psk, *dest)
+		go serveConn(c, priv, psk, *dest, rc)
 	}
 }
 
-func serveConn(c net.Conn, priv noise.DHKey, psk []byte, dest string) {
+func serveConn(c net.Conn, priv noise.DHKey, psk []byte, dest string, rc *replayCache) {
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(15 * time.Second))
 
-	sc, consumed, err := serverHandshake(c, priv, psk)
+	sc, consumed, err := serverHandshake(c, priv, psk, rc)
 	if err != nil {
 		// зонд/мусор -> прозрачный проброс на реальный сайт, переигрывая прочитанное
 		fallback(c, consumed, dest)

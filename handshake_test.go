@@ -6,6 +6,9 @@ import (
 	"io"
 	"net"
 	"testing"
+	"time"
+
+	"github.com/flynn/noise"
 )
 
 func TestHandshakeRoundTrip(t *testing.T) {
@@ -28,7 +31,7 @@ func TestHandshakeRoundTrip(t *testing.T) {
 		clientCh <- clientResult{sc, err}
 	}()
 
-	serverSC, consumed, err := serverHandshake(c2, serverKP, psk)
+	serverSC, consumed, err := serverHandshake(c2, serverKP, psk, newReplayCache(time.Minute))
 	if err != nil {
 		t.Fatalf("serverHandshake: %v (consumed %d bytes)", err, len(consumed))
 	}
@@ -76,7 +79,7 @@ func TestServerHandshakeRejectsBadPSK(t *testing.T) {
 		close(done)
 	}()
 
-	_, consumed, err := serverHandshake(c2, serverKP, goodPSK)
+	_, consumed, err := serverHandshake(c2, serverKP, goodPSK, newReplayCache(time.Minute))
 	if err == nil {
 		t.Fatal("expected error for bad psk")
 	}
@@ -87,6 +90,65 @@ func TestServerHandshakeRejectsBadPSK(t *testing.T) {
 	c1.Close()
 	c2.Close()
 	<-done
+}
+
+func TestServerHandshakeRejectsReplay(t *testing.T) {
+	serverKP, err := genKeypair()
+	if err != nil {
+		t.Fatalf("genKeypair: %v", err)
+	}
+	psk := make([]byte, 32)
+	rand.Read(psk)
+
+	// Строим один валидный msg1 напрямую (то же, что делает clientHandshake).
+	hs, err := newHandshakeState(true, psk, noise.DHKey{}, serverKP.Public)
+	if err != nil {
+		t.Fatalf("newHandshakeState: %v", err)
+	}
+	msg1, _, _, err := hs.WriteMessage(nil, nil)
+	if err != nil {
+		t.Fatalf("WriteMessage: %v", err)
+	}
+	mimic, err := buildMimicClientHello("www.google.com", msg1[:32], msg1[32:48])
+	if err != nil {
+		t.Fatalf("buildMimicClientHello: %v", err)
+	}
+
+	rc := newReplayCache(time.Minute)
+
+	// Первая попытка с этими байтами должна пройти.
+	c1, c2 := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		c1.Write(mimic)
+		buf := make([]byte, hsMsgLen)
+		io.ReadFull(c1, buf) // разблокировать conn.Write(msg2) на сервере
+		close(done)
+	}()
+	if _, _, err := serverHandshake(c2, serverKP, psk, rc); err != nil {
+		t.Fatalf("first attempt: expected success, got %v", err)
+	}
+	c1.Close()
+	c2.Close()
+	<-done
+
+	// Вторая попытка с ТЕМИ ЖЕ САМЫМИ байтами — должна быть отклонена как replay.
+	c3, c4 := net.Pipe()
+	done2 := make(chan struct{})
+	go func() {
+		c3.Write(mimic)
+		close(done2)
+	}()
+	_, consumed, err := serverHandshake(c4, serverKP, psk, rc)
+	if err == nil {
+		t.Fatal("expected replay to be rejected")
+	}
+	if len(consumed) == 0 {
+		t.Fatal("expected consumed bytes for fallback replay")
+	}
+	c3.Close()
+	c4.Close()
+	<-done2
 }
 
 func TestServerHandshakeRejectsGarbage(t *testing.T) {
@@ -104,7 +166,7 @@ func TestServerHandshakeRejectsGarbage(t *testing.T) {
 		close(done)
 	}()
 
-	_, consumed, err := serverHandshake(c2, serverKP, psk)
+	_, consumed, err := serverHandshake(c2, serverKP, psk, newReplayCache(time.Minute))
 	if err == nil {
 		t.Fatal("expected error for garbage input")
 	}

@@ -30,6 +30,7 @@ import (
 const hsMsgLen = 32 + 16 // e + tag
 
 var errAuth = errors.New("mirage: handshake auth failed")
+var errReplay = errors.New("mirage: replayed handshake")
 
 func newHandshakeState(initiator bool, psk []byte, staticKP noise.DHKey, peerStatic []byte) (*noise.HandshakeState, error) {
 	return noise.NewHandshakeState(noise.Config{
@@ -78,7 +79,9 @@ func clientHandshake(conn net.Conn, serverPub, psk []byte, sni string) (*secureC
 
 // serverHandshake пытается принять клиента. Всегда возвращает consumed —
 // байты, уже прочитанные из conn, чтобы caller мог их переиграть в fallback.
-func serverHandshake(conn net.Conn, staticKP noise.DHKey, psk []byte) (sc *secureConn, consumed []byte, err error) {
+// rc — общий на процесс анти-replay кэш (см. replay.go); проверяется только
+// после успешной psk-аутентификации, чтобы мусор его не засорял.
+func serverHandshake(conn net.Conn, staticKP noise.DHKey, psk []byte, rc *replayCache) (sc *secureConn, consumed []byte, err error) {
 	ecPub, tag1, consumed, perr := parseMimicClientHello(conn)
 	if perr != nil {
 		return nil, consumed, perr
@@ -91,6 +94,10 @@ func serverHandshake(conn net.Conn, staticKP noise.DHKey, psk []byte) (sc *secur
 	msg1 := append(append([]byte(nil), ecPub...), tag1...)
 	if _, _, _, e := hs.ReadMessage(nil, msg1); e != nil {
 		return nil, consumed, errAuth // зонд / мусор -> fallback
+	}
+
+	if rc.checkAndRemember(ecPub) {
+		return nil, consumed, errReplay // повтор ранее принятого msg1 -> fallback
 	}
 
 	msg2, csC2S, csS2C, e := hs.WriteMessage(nil, nil)
