@@ -184,6 +184,11 @@ func (s *Session) registerStream(st *Stream) {
 // Open (клиентская сторона) открывает новый логический стрим; payload —
 // содержимое OPEN-кадра (в проекте — закодированный адрес цели, см.
 // socks.EncodeAddr).
+// ponytail: nextID оборачивается после 2^32-1 вызовов Open на одной сессии
+// и теоретически может вернуть 0, коллизия с зарезервированным id
+// padding-кадров (см. writePadding) — практически недостижимо (потребовало
+// бы больше 4 миллиардов открытых стримов на одной живой сессии), апгрейд
+// на u64 при появлении реальной угрозы.
 func (s *Session) Open(payload []byte) (*Stream, error) {
 	id := atomic.AddUint32(&s.nextID, 1)
 	st := s.buildStream(id)
