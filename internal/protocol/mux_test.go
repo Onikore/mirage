@@ -72,6 +72,40 @@ func TestSessionConcurrentStreams(t *testing.T) {
 	}
 }
 
+// TestReadDrainsBufferedDataBeforeRemoteClose deterministically reconstructs
+// the exact state that caused data loss on real traffic during manual
+// verification: a stream has one already-buffered-but-unread data frame at
+// the moment readLoop processes that stream's CLOSE frame. Constructed
+// directly (no network, no goroutine timing) because reproducing the race
+// through net.Pipe turned out to be unreliable -- net.Pipe's synchronous,
+// unbuffered handoff keeps the writer in lockstep with readLoop, which
+// prevented the race from manifesting even against the old, buggy
+// implementation. Real TCP (used in manual verification with actual HTTP
+// traffic) lets the OS buffer the DATA and CLOSE frames together, letting
+// readLoop race ahead of the consumer -- which is what exposed the bug.
+func TestReadDrainsBufferedDataBeforeRemoteClose(t *testing.T) {
+	st := &Stream{
+		readCh:    make(chan []byte, 4),
+		abandonCh: make(chan struct{}),
+	}
+	want := []byte("final-chunk")
+	st.readCh <- want // data already arrived and is sitting in the buffer
+	st.closeReadCh()  // readLoop then processes that stream's CLOSE frame
+
+	buf := make([]byte, len(want))
+	n, err := io.ReadFull(st, buf)
+	if err != nil {
+		t.Fatalf("ReadFull: %v (got %d/%d bytes: %q)", err, n, len(want), buf[:n])
+	}
+	if !bytes.Equal(buf, want) {
+		t.Fatalf("got %q, want %q", buf, want)
+	}
+
+	if _, err := st.Read(make([]byte, 1)); err != io.EOF {
+		t.Errorf("read after drain: err=%v, want io.EOF", err)
+	}
+}
+
 func TestStreamCloseYieldsEOF(t *testing.T) {
 	c1, c2 := net.Pipe()
 	client := NewSession(c1)

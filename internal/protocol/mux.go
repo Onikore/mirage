@@ -7,6 +7,27 @@ package protocol
 // контракт net.Conn (один параллельный читатель + один параллельный
 // писатель), так что SecureConn не требует дополнительной синхронизации.
 //
+// Два разных сигнала завершения стрима, и это принципиально:
+//   - удалённый CLOSE (пришёл кадр от собеседника) закрывает readCh —
+//     ТОЛЬКО readLoop когда-либо закрывает readCh, и делает это строго
+//     последовательно со своими же send'ами в тот же канал (единственная
+//     горутина, не может слать и закрывать одновременно сама с собой) —
+//     поэтому уже забуференные-но-непрочитанные данные корректно
+//     дочитываются перед EOF (гарантия Go: закрытый буферизованный канал
+//     сначала отдаёт всё, что в нём есть, потом уже сигналит закрытие).
+//   - локальный Close() (сам код-потребитель решил бросить стрим) сигналит
+//     через ОТДЕЛЬНЫЙ abandonCh, а не через readCh — так Close() никогда
+//     не участвует в закрытии канала, которым владеет readLoop, и гонки
+//     между «есть данные» и «удалённо закрыли» просто не существует.
+//
+// Более ранняя версия использовала один общий closeCh на оба случая —
+// Read() гонял select{readCh, closeCh}, и если оба были готовы одновременно
+// (данные уже пришли, и тут же прилетел CLOSE), Go выбирает ветку
+// псевдослучайно: примерно в половине случаев терялся последний
+// буферизованный кусок. Поймано вручную на реальном трафике (HTTP-ответ +
+// немедленное закрытие соединения источником), не юнит-тестами и не
+// -race — это состояние гонки в логике выбора, а не гонка по памяти.
+//
 // ponytail: нет протокольного backpressure — при переполнении очереди
 // принятых-но-невычитанных стримов новые OPEN тихо дропаются. Апгрейд —
 // добавить сигнал управления потоком, если станет проблемой.
@@ -100,9 +121,12 @@ func (s *Session) readLoop() {
 			st := s.streams[id]
 			s.mu.Unlock()
 			if st != nil {
+				// readCh закрывает только readLoop (эта же горутина, ниже) —
+				// поэтому send здесь никогда не гонится с закрытием канала.
 				select {
 				case st.readCh <- payload:
-				case <-st.closeCh:
+				case <-st.abandonCh:
+					// стрим брошен локально -- не пытаться доставить дальше
 				}
 			}
 		case frameClose:
@@ -111,7 +135,7 @@ func (s *Session) readLoop() {
 			delete(s.streams, id)
 			s.mu.Unlock()
 			if st != nil {
-				st.closeOnce.Do(func() { close(st.closeCh) })
+				st.closeReadCh()
 			}
 		}
 	}
@@ -119,10 +143,10 @@ func (s *Session) readLoop() {
 
 func (s *Session) newStream(id uint32) *Stream {
 	st := &Stream{
-		id:      id,
-		session: s,
-		readCh:  make(chan []byte, 64),
-		closeCh: make(chan struct{}),
+		id:        id,
+		session:   s,
+		readCh:    make(chan []byte, 64),
+		abandonCh: make(chan struct{}),
 	}
 	s.mu.Lock()
 	s.streams[id] = st
@@ -165,7 +189,7 @@ func (s *Session) shutdown(err error) {
 	s.closeErr = err
 	close(s.closed)
 	for _, st := range s.streams {
-		st.closeOnce.Do(func() { close(st.closeCh) })
+		st.closeReadCh() // безопасно: shutdown вызывается только из readLoop
 	}
 	s.mu.Unlock()
 }
@@ -176,10 +200,20 @@ type Stream struct {
 	id          uint32
 	session     *Session
 	openPayload []byte
-	readCh      chan []byte
-	readBuf     []byte
-	closeCh     chan struct{}
-	closeOnce   sync.Once
+
+	readCh          chan []byte
+	readChCloseOnce sync.Once // readLoop закрывает readCh не более раза
+	readBuf         []byte
+
+	abandonCh   chan struct{} // локальный Close(): "больше не читаю", см. doc файла
+	abandonOnce sync.Once
+}
+
+// closeReadCh закрывает readCh при удалённом CLOSE или при остановке сессии.
+// Вызывается ИСКЛЮЧИТЕЛЬНО из горутины readLoop (единственный писатель в
+// readCh), поэтому конкурентных close/send с этим же каналом не бывает.
+func (st *Stream) closeReadCh() {
+	st.readChCloseOnce.Do(func() { close(st.readCh) })
 }
 
 func (st *Stream) Write(p []byte) (int, error) {
@@ -197,7 +231,7 @@ func (st *Stream) Read(p []byte) (int, error) {
 				return 0, io.EOF
 			}
 			st.readBuf = b
-		case <-st.closeCh:
+		case <-st.abandonCh:
 			return 0, io.EOF
 		}
 	}
@@ -210,6 +244,6 @@ func (st *Stream) Close() error {
 	st.session.mu.Lock()
 	delete(st.session.streams, st.id)
 	st.session.mu.Unlock()
-	st.closeOnce.Do(func() { close(st.closeCh) })
+	st.abandonOnce.Do(func() { close(st.abandonCh) })
 	return st.session.writeFrame(st.id, frameClose, nil)
 }
