@@ -147,6 +147,7 @@ func cmdClient(args []string) {
 	server := fs.String("server", "", "mirage server HOST:PORT")
 	pubHex := fs.String("pub", "", "server public key (hex)")
 	pskHex := fs.String("psk", "", "pre-shared key (hex)")
+	sni := fs.String("sni", "www.google.com", "SNI hostname to wear in the disguised ClientHello")
 	fs.Parse(args)
 
 	pub := mustHex(*pubHex)
@@ -162,11 +163,11 @@ func cmdClient(args []string) {
 		if err != nil {
 			continue
 		}
-		go clientConn(c, *server, pub, psk)
+		go clientConn(c, *server, pub, psk, *sni)
 	}
 }
 
-func clientConn(c net.Conn, server string, pub, psk []byte) {
+func clientConn(c net.Conn, server string, pub, psk []byte, sni string) {
 	defer c.Close()
 	host, port, err := socksAccept(c)
 	if err != nil {
@@ -179,7 +180,7 @@ func clientConn(c net.Conn, server string, pub, psk []byte) {
 		return
 	}
 	up.SetDeadline(time.Now().Add(15 * time.Second))
-	sc, err := clientHandshake(up, pub, psk)
+	sc, err := clientHandshake(up, pub, psk, sni)
 	if err != nil {
 		log.Printf("handshake: %v", err)
 		up.Close()
