@@ -9,8 +9,11 @@ package main
 //   * анти-зонд: без верного PSK тег не проходит Open() -> сервер уводит в fallback
 //
 // Wire:
-//   msg1 (client->server): e_pub_c(32) || tag1(16)   tag1 = AEAD(k1, n=0, "", ad=e_pub_c)
+//   msg1 (client->server): mimicked TLS 1.3 ClientHello (Chrome fingerprint,
+//     see camouflage.go) carrying e_pub_c in its key_share extension and
+//     tag1 in its session_id.  tag1 = AEAD(k1, n=0, "", ad=e_pub_c)
 //   msg2 (server->client): e_pub_s(32) || tag2(16)   tag2 = AEAD(k1, n=1, "", ad=e_pub_s)
+//     (raw, not TLS-framed — see README "Что дальше" for the remaining gap)
 //   k1 = HKDF( extract(PSK, es), "mirage-v0 hs" )
 //   master = extract(PSK, es||ee); k_c2s/k_s2c = HKDF(master, label||e_pub_c||e_pub_s)
 
@@ -34,7 +37,7 @@ var (
 )
 
 // clientHandshake выполняет рукопожатие и возвращает защищённый канал.
-func clientHandshake(conn net.Conn, serverPub, psk []byte) (*secureConn, error) {
+func clientHandshake(conn net.Conn, serverPub, psk []byte, sni string) (*secureConn, error) {
 	ec, err := genKey()
 	if err != nil {
 		return nil, err
@@ -49,7 +52,11 @@ func clientHandshake(conn net.Conn, serverPub, psk []byte) (*secureConn, error) 
 	a := newAEAD(k1)
 
 	tag1 := a.Seal(nil, nonce12(0), nil, ecPub)
-	if _, err := conn.Write(concat(ecPub, tag1)); err != nil {
+	msg1, err := buildMimicClientHello(sni, ecPub, tag1)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := conn.Write(msg1); err != nil {
 		return nil, err
 	}
 
@@ -77,13 +84,10 @@ func clientHandshake(conn net.Conn, serverPub, psk []byte) (*secureConn, error) 
 // serverHandshake пытается принять клиента. Всегда возвращает consumed —
 // байты, уже прочитанные из conn, чтобы caller мог их переиграть в fallback.
 func serverHandshake(conn net.Conn, priv *ecdh.PrivateKey, psk []byte) (sc *secureConn, consumed []byte, err error) {
-	buf := make([]byte, hsMsgLen)
-	n, rerr := io.ReadFull(conn, buf)
-	consumed = buf[:n]
-	if rerr != nil {
-		return nil, consumed, rerr
+	ecPub, tag1, consumed, perr := parseMimicClientHello(conn)
+	if perr != nil {
+		return nil, consumed, perr
 	}
-	ecPub, tag1 := buf[:32], buf[32:48]
 
 	es, e := ecdhShared(priv, ecPub)
 	if e != nil {
