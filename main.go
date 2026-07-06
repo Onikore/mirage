@@ -1,10 +1,11 @@
 package main
 
-// main.go — подкоманды: keygen | server | client
+// main.go — подкоманды: keygen | server | client | gui
 //
 //   mirage keygen
 //   mirage server -listen :8443 -priv <hex> -psk <hex> -dest example.com:443
 //   mirage client -listen 127.0.0.1:1080 -server HOST:8443 -pub <hex> -psk <hex>
+//   mirage gui   (только Windows-сборка — см. gui_windows.go)
 //
 // Скелет: одно tunnel-соединение на один SOCKS5-запрос (mux — TODO).
 
@@ -25,9 +26,12 @@ import (
 )
 
 func main() {
+	// Без аргументов — сразу GUI: двойной клик по mirage-gui.exe из
+	// Проводника запускает процесс без аргументов, а у windowsgui-подсистемы
+	// нет консоли, чтобы показать usage — значит, ничего лучше не остаётся.
 	if len(os.Args) < 2 {
-		fmt.Println("usage: mirage <keygen|server|client> [flags]")
-		os.Exit(1)
+		cmdGUI()
+		return
 	}
 	switch os.Args[1] {
 	case "keygen":
@@ -36,6 +40,8 @@ func main() {
 		cmdServer(os.Args[2:])
 	case "client":
 		cmdClient(os.Args[2:])
+	case "gui":
+		cmdGUI()
 	default:
 		fmt.Println("unknown subcommand:", os.Args[1])
 		os.Exit(1)
@@ -224,12 +230,21 @@ func cmdClient(args []string) {
 		log.Fatal(err)
 	}
 	log.Printf("SOCKS5 on %s -> mirage %s", *listen, *server)
+	runClientListener(ln, *server, pub, psk, *sni)
+}
+
+// runClientListener принимает соединения на ln и обслуживает их до тех пор,
+// пока ln не закроют (например, вызовом ln.Close() из другой горутины —
+// так GUI-клиент реализует «Disconnect»). Возврат из Accept с ошибкой
+// трактуется как «слушатель закрыт, пора остановиться», а не как повод
+// молотить цикл дальше.
+func runClientListener(ln net.Listener, server string, pub, psk []byte, sni string) {
 	for {
 		c, err := ln.Accept()
 		if err != nil {
-			continue
+			return
 		}
-		go clientConn(c, *server, pub, psk, *sni)
+		go clientConn(c, server, pub, psk, sni)
 	}
 }
 

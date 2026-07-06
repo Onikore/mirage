@@ -18,6 +18,27 @@ flynn/noise (аудированная реализация Noise Protocol Framew
 go build -o mirage .
 ```
 
+### Windows GUI
+
+Кросс-компилируется с Linux/macOS без mingw/cgo (`github.com/lxn/walk`
+оборачивает Win32 напрямую). Два разных вывода из одного и того же кода —
+разные линкер-флаги под разное использование:
+
+```bash
+# mirage.exe — консольная подсистема, для запуска из cmd/PowerShell
+# (keygen/server/client, видимый лог)
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o mirage.exe .
+
+# mirage-gui.exe — windowsgui подсистема, для запуска двойным кликом
+# (без мелькающей консоли позади окна)
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-H windowsgui" -o mirage-gui.exe .
+```
+
+Обе сборки — один и тот же бинарник с одними и теми же подкомандами;
+разница только в том, видна ли консоль. `mirage-gui.exe` без аргументов
+сразу открывает GUI (`gui` подкоманда), `mirage.exe` без GUI-флага ведёт
+себя как обычный CLI.
+
 ## Запуск (локальный тест)
 
 ```
@@ -87,7 +108,11 @@ curl --socks5-hostname 127.0.0.1:1080 https://blocked.example/
   `noise.CipherState`, хук для shaping
 - `addr.go`      — кодирование целевого адреса
 - `socks.go`     — SOCKS5 вход
-- `main.go`      — keygen / server / client
+- `main.go`      — keygen / server / client / gui
+- `gui_windows.go` — GUI-клиент (только Windows): поля + Connect/Disconnect
+  поверх того же `runClientListener`, что и `mirage client`
+- `gui_other.go`  — заглушка `cmdGUI` для не-Windows сборок
+- `guiconfig.go`  — сохранение/загрузка последних введённых в GUI полей
 
 ## Что дальше (по приоритету)
 
