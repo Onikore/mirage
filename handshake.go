@@ -12,22 +12,20 @@ package main
 // сообщение — сервер отклоняет и неверный psk, и мусорные байты уже на нём,
 // без паники (проверено).
 //
-// Wire (не меняется от предыдущей версии):
+// Wire:
 //   msg1 (client->server): мимикрированный TLS ClientHello (см. camouflage.go),
 //     несущий 48-байтовое Noise-сообщение (32Б эфемерный pubkey + 16Б AEAD-тег
 //     над пустым payload).
-//   msg2 (server->client): те же 48 байт, но без TLS-обёртки — см. README
-//     «Что дальше» про оставшийся пробел ServerHello-камуфляжа.
+//   msg2 (server->client): мимикрированный TLS ServerHello + продолжающая
+//     запись (см. servhello.go), несущие те же 48 байт (32Б эфемерный pubkey
+//     + 16Б AEAD-тег).
 
 import (
 	"errors"
-	"io"
 	"net"
 
 	"github.com/flynn/noise"
 )
-
-const hsMsgLen = 32 + 16 // e + tag
 
 var errAuth = errors.New("mirage: handshake auth failed")
 var errReplay = errors.New("mirage: replayed handshake")
@@ -64,10 +62,11 @@ func clientHandshake(conn net.Conn, serverPub, psk []byte, sni string) (*secureC
 		return nil, err
 	}
 
-	buf := make([]byte, hsMsgLen)
-	if _, err := io.ReadFull(conn, buf); err != nil {
-		return nil, err
+	esPub, tag2, err := parseMimicServerHello(conn)
+	if err != nil {
+		return nil, errAuth
 	}
+	buf := append(append([]byte(nil), esPub...), tag2...)
 	_, csC2S, csS2C, err := hs.ReadMessage(nil, buf)
 	if err != nil {
 		return nil, errAuth
@@ -85,7 +84,7 @@ func clientHandshake(conn net.Conn, serverPub, psk []byte, sni string) (*secureC
 // (см. replay.go); проверяется только после успешной аутентификации, чтобы
 // мусор его не засорял.
 func serverHandshake(conn net.Conn, staticKP noise.DHKey, psks [][]byte, rc *replayCache) (sc *secureConn, consumed []byte, err error) {
-	ecPub, tag1, consumed, perr := parseMimicClientHello(conn)
+	ecPub, tag1, sessionID, consumed, perr := parseMimicClientHello(conn)
 	if perr != nil {
 		return nil, consumed, perr
 	}
@@ -114,7 +113,11 @@ func serverHandshake(conn net.Conn, staticKP noise.DHKey, psks [][]byte, rc *rep
 	if e != nil {
 		return nil, consumed, e
 	}
-	if _, e := conn.Write(msg2); e != nil {
+	mimic2, e := buildMimicServerHello(sessionID, msg2[:32], msg2[32:48])
+	if e != nil {
+		return nil, consumed, e
+	}
+	if _, e := conn.Write(mimic2); e != nil {
 		return nil, consumed, e
 	}
 

@@ -17,7 +17,7 @@ func TestMimicClientHelloRoundTrip(t *testing.T) {
 		t.Fatalf("build: %v", err)
 	}
 
-	gotPub, gotTag, consumed, err := parseMimicClientHello(bytes.NewReader(raw))
+	gotPub, gotTag, gotSessionID, consumed, err := parseMimicClientHello(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -27,6 +27,9 @@ func TestMimicClientHelloRoundTrip(t *testing.T) {
 	if !bytes.Equal(gotTag, tag1) {
 		t.Errorf("tag1 mismatch: got %x want %x", gotTag, tag1)
 	}
+	if len(gotSessionID) != 32 || !bytes.Equal(gotSessionID[:16], tag1) {
+		t.Errorf("sessionID = %x, want 32 bytes starting with tag1 %x", gotSessionID, tag1)
+	}
 	if len(consumed) != len(raw) {
 		t.Errorf("consumed %d bytes, want %d (full record)", len(consumed), len(raw))
 	}
@@ -34,7 +37,7 @@ func TestMimicClientHelloRoundTrip(t *testing.T) {
 
 func TestParseMimicClientHelloGarbage(t *testing.T) {
 	in := []byte("GET / HTTP/1.1\r\n")
-	_, _, consumed, err := parseMimicClientHello(bytes.NewReader(in))
+	_, _, _, consumed, err := parseMimicClientHello(bytes.NewReader(in))
 	if err == nil {
 		t.Fatal("expected error for non-TLS input")
 	}
@@ -46,7 +49,7 @@ func TestParseMimicClientHelloGarbage(t *testing.T) {
 func TestParseMimicClientHelloShortRead(t *testing.T) {
 	// Prober sends 2 bytes then closes the connection (EOF).
 	in := []byte{0x16, 0x03}
-	_, _, consumed, err := parseMimicClientHello(bytes.NewReader(in))
+	_, _, _, consumed, err := parseMimicClientHello(bytes.NewReader(in))
 	if err == nil {
 		t.Fatal("expected error for truncated input")
 	}

@@ -10,8 +10,10 @@ package main
 // заполняет случайными 32 байтами для совместимости с middlebox'ами, так
 // что по байтам неотличимо.
 //
-// ServerHello от сервера пока НЕ мимикрируется (см. README) — активный
-// пробинг, доводящий handshake до конца, это всё ещё увидит.
+// parseMimicClientHello также возвращает полный session_id клиента (32Б) —
+// сервер обязан эхом вернуть его в своём ServerHello (см. servhello.go),
+// иначе пассивный наблюдатель, сверяющий session_id между двумя половинами
+// хендшейка, увидел бы несоответствие с настоящим TLS 1.3.
 
 import (
 	"crypto/rand"
@@ -70,34 +72,35 @@ func buildMimicClientHello(sni string, ecPub, tag1 []byte) ([]byte, error) {
 // parseMimicClientHello reads one mimicked ClientHello record from r.
 // consumed always holds every byte actually read, even on error, so the
 // caller's anti-probe fallback can replay exactly what a prober sent.
-func parseMimicClientHello(r io.Reader) (ecPub, tag1, consumed []byte, err error) {
+func parseMimicClientHello(r io.Reader) (ecPub, tag1, sessionID, consumed []byte, err error) {
 	hdr := make([]byte, 5)
 	nHdr, hdrErr := io.ReadFull(r, hdr)
 	consumed = append(consumed, hdr[:nHdr]...)
 	if hdrErr != nil {
-		return nil, nil, consumed, hdrErr
+		return nil, nil, nil, consumed, hdrErr
 	}
 	if hdr[0] != 0x16 {
-		return nil, nil, consumed, errors.New("mirage: not a handshake record")
+		return nil, nil, nil, consumed, errors.New("mirage: not a handshake record")
 	}
 	n := binary.BigEndian.Uint16(hdr[3:5])
 	if n == 0 || n > maxMimicHelloLen {
-		return nil, nil, consumed, errors.New("mirage: implausible client hello length")
+		return nil, nil, nil, consumed, errors.New("mirage: implausible client hello length")
 	}
 	body := make([]byte, n)
 	nBody, bodyErr := io.ReadFull(r, body)
 	consumed = append(consumed, body[:nBody]...)
 	if bodyErr != nil {
-		return nil, nil, consumed, bodyErr
+		return nil, nil, nil, consumed, bodyErr
 	}
 
 	hello := tls.UnmarshalClientHello(body)
 	if hello == nil {
-		return nil, nil, consumed, errors.New("mirage: not a valid client hello")
+		return nil, nil, nil, consumed, errors.New("mirage: not a valid client hello")
 	}
 	if len(hello.SessionId) < 16 {
-		return nil, nil, consumed, errors.New("mirage: session id too short")
+		return nil, nil, nil, consumed, errors.New("mirage: session id too short")
 	}
+	sessionID = hello.SessionId
 	tag1 = hello.SessionId[:16]
 
 	for _, ks := range hello.KeyShares {
@@ -107,7 +110,7 @@ func parseMimicClientHello(r io.Reader) (ecPub, tag1, consumed []byte, err error
 		}
 	}
 	if ecPub == nil {
-		return nil, nil, consumed, errors.New("mirage: no x25519 key share")
+		return nil, nil, nil, consumed, errors.New("mirage: no x25519 key share")
 	}
-	return ecPub, tag1, consumed, nil
+	return ecPub, tag1, sessionID, consumed, nil
 }

@@ -121,8 +121,7 @@ func TestServerHandshakeRejectsReplay(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		c1.Write(mimic)
-		buf := make([]byte, hsMsgLen)
-		io.ReadFull(c1, buf) // разблокировать conn.Write(msg2) на сервере
+		parseMimicServerHello(c1) // разблокировать conn.Write(mimic2) на сервере
 		close(done)
 	}()
 	if _, _, err := serverHandshake(c2, serverKP, [][]byte{psk}, rc); err != nil {
