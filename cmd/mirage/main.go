@@ -7,7 +7,8 @@ package main
 //   mirage client -listen 127.0.0.1:1080 -server HOST:8443 -pub <hex> -psk <hex>
 //   mirage gui   (только Windows-сборка — см. gui_windows.go)
 //
-// Скелет: одно tunnel-соединение на один SOCKS5-запрос (mux — TODO).
+// Клиент делает одно рукопожатие на процесс (не на запрос) и мультиплексирует
+// все SOCKS5-запросы по одной сессии — см. internal/protocol/mux.go.
 
 import (
 	"bytes"

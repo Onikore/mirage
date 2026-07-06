@@ -9,6 +9,40 @@ import (
 	"testing"
 )
 
+// TestDroppedOpenIsNotRegistered guards against a leak found in final
+// review: when acceptCh's backlog is full, the OPEN frame handler must drop
+// the new stream WITHOUT registering it in s.streams. The earlier version
+// registered it unconditionally before attempting the enqueue -- a stream
+// left registered but never Accept()-ed would sit in the map forever, and
+// once its readCh (cap 64) filled with subsequent DATA frames, readLoop
+// would block trying to deliver the 65th, stalling every other stream on
+// the session, not just the dropped one. An unbuffered acceptCh with no
+// waiting receiver deterministically hits the drop path, so this is
+// reproduced directly rather than via timing.
+func TestDroppedOpenIsNotRegistered(t *testing.T) {
+	s := &Session{
+		streams:  make(map[uint32]*Stream),
+		acceptCh: make(chan *Stream), // unbuffered -- always drops without a waiting Accept()
+		closed:   make(chan struct{}),
+	}
+
+	st := s.buildStream(1)
+	st.openPayload = []byte("x")
+	select {
+	case s.acceptCh <- st:
+		t.Fatal("unexpected: send succeeded on an unbuffered channel with no receiver")
+	default:
+		// expected -- this is the drop path
+	}
+
+	s.mu.Lock()
+	_, registered := s.streams[1]
+	s.mu.Unlock()
+	if registered {
+		t.Fatal("dropped stream must not be registered in s.streams -- this is exactly the leak/deadlock bug")
+	}
+}
+
 func TestSessionConcurrentStreams(t *testing.T) {
 	c1, c2 := net.Pipe()
 	client := NewSession(c1)

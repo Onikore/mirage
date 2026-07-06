@@ -29,8 +29,13 @@ package protocol
 // -race — это состояние гонки в логике выбора, а не гонка по памяти.
 //
 // ponytail: нет протокольного backpressure — при переполнении очереди
-// принятых-но-невычитанных стримов новые OPEN тихо дропаются. Апгрейд —
-// добавить сигнал управления потоком, если станет проблемой.
+// принятых-но-невычитанных стримов новые OPEN тихо дропаются (см.
+// frameOpen в readLoop: стрим НЕ регистрируется в s.streams, если не
+// поместился в acceptCh — иначе оставшийся в карте, но никем не
+// вычитываемый стрим рано или поздно забивает свой readCh, а readLoop
+// вечно блокируется, пытаясь доставить в него следующий DATA-кадр,
+// останавливая тем самым всю сессию, а не только этот один запрос).
+// Апгрейд — добавить сигнал управления потоком, если станет проблемой.
 
 import (
 	"encoding/binary"
@@ -44,6 +49,12 @@ const (
 	frameData  byte = 2
 	frameClose byte = 3
 )
+
+// maxFramePayload — payload-длина кадра кодируется u16, больше физически
+// не влезет; Stream.Write режет более крупные Write-вызовы на несколько
+// кадров вместо того, чтобы молча обрезать длину и рассинхронизировать
+// поток для следующего читателя.
+const maxFramePayload = 65535
 
 // Session мультиплексирует много Stream поверх одного io.ReadWriteCloser
 // (в проекте — *SecureConn).
@@ -109,12 +120,16 @@ func (s *Session) readLoop() {
 
 		switch typ {
 		case frameOpen:
-			st := s.newStream(id)
+			st := s.buildStream(id)
 			st.openPayload = payload
 			select {
 			case s.acceptCh <- st:
+				s.registerStream(st) // регистрируем, только когда реально принят в очередь
 			default:
-				// backlog full -- drop; см. doc-комментарий файла про backpressure
+				// backlog full -- дропаем и НЕ регистрируем: последующий DATA/CLOSE
+				// для этого id найдёт nil в s.streams и будет тихо проигнорирован,
+				// вместо того чтобы копиться в readCh брошенного стрима и в итоге
+				// заблокировать этот select навечно (см. doc-комментарий файла)
 			}
 		case frameData:
 			s.mu.Lock()
@@ -141,17 +156,22 @@ func (s *Session) readLoop() {
 	}
 }
 
-func (s *Session) newStream(id uint32) *Stream {
-	st := &Stream{
+// buildStream строит Stream, но НЕ регистрирует его в s.streams — вызывающий
+// решает, регистрировать ли (см. registerStream), в зависимости от того,
+// действительно ли стрим кому-то достался (см. frameOpen выше).
+func (s *Session) buildStream(id uint32) *Stream {
+	return &Stream{
 		id:        id,
 		session:   s,
 		readCh:    make(chan []byte, 64),
 		abandonCh: make(chan struct{}),
 	}
+}
+
+func (s *Session) registerStream(st *Stream) {
 	s.mu.Lock()
-	s.streams[id] = st
+	s.streams[st.id] = st
 	s.mu.Unlock()
-	return st
 }
 
 // Open (клиентская сторона) открывает новый логический стрим; payload —
@@ -159,7 +179,8 @@ func (s *Session) newStream(id uint32) *Stream {
 // socks.EncodeAddr).
 func (s *Session) Open(payload []byte) (*Stream, error) {
 	id := atomic.AddUint32(&s.nextID, 1)
-	st := s.newStream(id)
+	st := s.buildStream(id)
+	s.registerStream(st) // сторона-инициатор не подвержена переполнению acceptCh
 	if err := s.writeFrame(id, frameOpen, payload); err != nil {
 		return nil, err
 	}
@@ -217,10 +238,19 @@ func (st *Stream) closeReadCh() {
 }
 
 func (st *Stream) Write(p []byte) (int, error) {
-	if err := st.session.writeFrame(st.id, frameData, p); err != nil {
-		return 0, err
+	total := 0
+	for len(p) > 0 {
+		chunk := p
+		if len(chunk) > maxFramePayload {
+			chunk = p[:maxFramePayload]
+		}
+		if err := st.session.writeFrame(st.id, frameData, chunk); err != nil {
+			return total, err
+		}
+		total += len(chunk)
+		p = p[len(chunk):]
 	}
-	return len(p), nil
+	return total, nil
 }
 
 func (st *Stream) Read(p []byte) (int, error) {
