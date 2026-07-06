@@ -17,6 +17,8 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/flynn/noise"
@@ -76,7 +78,8 @@ func cmdServer(args []string) {
 	fs := flag.NewFlagSet("server", flag.ExitOnError)
 	listen := fs.String("listen", ":8443", "listen address")
 	privHex := fs.String("priv", "", "server private key (hex)")
-	pskHex := fs.String("psk", "", "pre-shared key (hex)")
+	pskHex := fs.String("psk", "", "pre-shared key (hex), single-key mode")
+	pskFile := fs.String("psk-file", "", "file with one hex psk per line; supports multiple simultaneously-valid keys and SIGHUP reload (for zero-downtime rotation)")
 	dest := fs.String("dest", "example.com:443", "fallback destination for probers")
 	fs.Parse(args)
 
@@ -84,7 +87,10 @@ func cmdServer(args []string) {
 	if err != nil {
 		log.Fatal("bad priv: ", err)
 	}
-	psk := mustHex(*pskHex)
+	ps := newPSKSet(loadInitialPSKs(*pskHex, *pskFile))
+	if *pskFile != "" {
+		watchPSKFileReload(*pskFile, *pskHex, ps)
+	}
 	rc := newReplayCache(replayWindow)
 	il := newIPLimiter()
 
@@ -98,11 +104,58 @@ func cmdServer(args []string) {
 		if err != nil {
 			continue
 		}
-		go serveConn(c, priv, psk, *dest, rc, il)
+		go serveConn(c, priv, ps, *dest, rc, il)
 	}
 }
 
-func serveConn(c net.Conn, priv noise.DHKey, psk []byte, dest string, rc *replayCache, il *ipLimiter) {
+// loadInitialPSKs объединяет -psk (если задан) и -psk-file (если задан) в
+// один начальный набор. Пусто в обоих — фатальная ошибка конфигурации: явный
+// отказ при старте лучше, чем сервер, который потом молча отвергает всех.
+func loadInitialPSKs(pskHex, pskFile string) [][]byte {
+	var keys [][]byte
+	if pskHex != "" {
+		keys = append(keys, mustHex(pskHex))
+	}
+	if pskFile != "" {
+		fileKeys, err := loadPSKFile(pskFile)
+		if err != nil {
+			log.Fatal("psk-file: ", err)
+		}
+		keys = append(keys, fileKeys...)
+	}
+	if len(keys) == 0 {
+		log.Fatal("no psk configured: pass -psk and/or -psk-file")
+	}
+	return keys
+}
+
+// watchPSKFileReload перечитывает pskFile по SIGHUP и атомарно подменяет
+// набор в ps — старые соединения не рвутся, новые попытки видят
+// обновлённый список. -psk (если был задан) остаётся действующим при
+// каждой перезагрузке. Плохой файл при перезагрузке — старый набор
+// сохраняется, ошибка только логируется (не блокировать всех опечаткой).
+func watchPSKFileReload(pskFile, pskHex string, ps *pskSet) {
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGHUP)
+	go func() {
+		for range sigs {
+			fileKeys, err := loadPSKFile(pskFile)
+			if err != nil {
+				log.Printf("psk-file reload failed, keeping current set: %v", err)
+				continue
+			}
+			var next [][]byte
+			if pskHex != "" {
+				next = append(next, mustHex(pskHex))
+			}
+			next = append(next, fileKeys...)
+			ps.Store(next)
+			log.Printf("psk-file reloaded: %d key(s) active", len(next))
+		}
+	}()
+}
+
+func serveConn(c net.Conn, priv noise.DHKey, ps *pskSet, dest string, rc *replayCache, il *ipLimiter) {
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(15 * time.Second))
 
@@ -116,7 +169,7 @@ func serveConn(c net.Conn, priv noise.DHKey, psk []byte, dest string, rc *replay
 		return
 	}
 
-	sc, consumed, err := serverHandshake(c, priv, psk, rc)
+	sc, consumed, err := serverHandshake(c, priv, ps.Load(), rc)
 	if err != nil {
 		// зонд/мусор -> прозрачный проброс на реальный сайт, переигрывая прочитанное
 		fallback(c, consumed, dest)
