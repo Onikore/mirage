@@ -1,12 +1,12 @@
-//go:build !windows
+//go:build !windows && !linux
 
 package main
 
 import "log"
 
-// cmdGUI — заглушка для не-Windows сборок. Сам GUI (gui_windows.go)
-// зависит от github.com/lxn/walk, которая оборачивает Win32 напрямую и не
-// собирается ни на каком другом GOOS в принципе.
+// cmdGUI — заглушка для платформ, для которых нет реализации GUI:
+// gui_windows.go (lxn/walk) собирается только под Windows, gui_linux.go
+// (Fyne) — только под Linux.
 func cmdGUI() {
-	log.Fatal("mirage gui: доступен только в Windows-сборке (GOOS=windows)")
+	log.Fatal("mirage gui: доступен только в Windows- и Linux-сборках (GOOS=windows или linux)")
 }
