@@ -256,44 +256,50 @@ func cmdClient(args []string) {
 		log.Fatal(err)
 	}
 
-	up, err := net.DialTimeout("tcp", *server, 10*time.Second)
+	// Первый коннект остаётся fail-fast -- если сервер недоступен или
+	// рукопожатие не проходит уже при старте, процесс завершается сразу, а
+	// не поднимает SOCKS5 вслепую (см. design spec, Global Constraints).
+	sess, err := dialSession(*server, pub, psk, *sni, *padding)
 	if err != nil {
-		log.Fatal("dial server: ", err)
-	}
-	up.SetDeadline(time.Now().Add(15 * time.Second))
-	sc, err := protocol.ClientHandshake(up, pub, psk, *sni)
-	if err != nil {
-		log.Fatal("handshake: ", err)
-	}
-	up.SetDeadline(time.Time{})
-	sess := protocol.NewSession(sc)
-	if *padding {
-		sess.StartPadding(1*time.Second, 5*time.Second, 32, 256)
+		log.Fatal(err)
 	}
 
+	dial := func() (*protocol.Session, error) {
+		return dialSession(*server, pub, psk, *sni, *padding)
+	}
+	h := newSessionHolder(sess, dial, func(s string) { log.Print(s) }, time.Second, 30*time.Second)
+
 	log.Printf("SOCKS5 on %s -> mirage %s (session established)", *listen, *server)
-	runClientListener(ln, sess)
+	runClientListener(ln, h)
 }
 
 // runClientListener принимает соединения на ln и обслуживает их до тех пор,
 // пока ln не закроют (например, вызовом ln.Close() из другой горутины —
 // так GUI-клиент реализует «Disconnect»). Все локальные SOCKS5-запросы
-// открывают новый Stream на ОДНОЙ и той же уже установленной sess — не
-// дозваниваются и не проводят рукопожатие заново.
-func runClientListener(ln net.Listener, sess *protocol.Session) {
+// открывают новый Stream на текущей сессии holder'а h — если сессия прямо
+// сейчас недоступна (идёт автопереподключение), запрос сразу отклоняется
+// (см. clientConn).
+func runClientListener(ln net.Listener, h *sessionHolder) {
 	for {
 		c, err := ln.Accept()
 		if err != nil {
 			return
 		}
-		go clientConn(c, sess)
+		go clientConn(c, h)
 	}
 }
 
-func clientConn(c net.Conn, sess *protocol.Session) {
+func clientConn(c net.Conn, h *sessionHolder) {
 	defer c.Close()
 	host, port, err := socks.Accept(c)
 	if err != nil {
+		return
+	}
+
+	sess := h.Current()
+	if sess == nil {
+		// Сессия прямо сейчас недоступна (идёт автопереподключение) --
+		// сразу отказать, не ждать (см. design spec).
 		return
 	}
 
