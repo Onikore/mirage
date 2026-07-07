@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -17,10 +18,14 @@ func TestRunClientListenerReturnsWhenListenerClosed(t *testing.T) {
 	}
 	c1, _ := net.Pipe()
 	sess := protocol.NewSession(c1)
+	h := newSessionHolder(sess, func() (*protocol.Session, error) {
+		return nil, errors.New("dial should not be called in this test")
+	}, nil, time.Millisecond, time.Millisecond)
+	defer h.Stop()
 
 	done := make(chan struct{})
 	go func() {
-		runClientListener(ln, sess)
+		runClientListener(ln, h)
 		close(done)
 	}()
 
