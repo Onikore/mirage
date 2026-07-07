@@ -51,6 +51,23 @@ Go-линкер подхватывает `.syso` из папки пакета а
 `cvtres.exe` не подходит — отдаёт big-obj формат, который линкер Go
 отклоняет (`sectnum < 0`).
 
+### Linux GUI
+
+`lxn/walk` — Win32-only, на Linux не собирается в принципе, поэтому
+`gui_linux.go` реализует тот же GUI (те же поля, та же логика
+connect/disconnect) на `fyne.io/fyne/v2` — кроссплатформенный тулкит с
+нативным Linux-бэкендом. Требует cgo и системные dev-заголовки (X11/OpenGL:
+пакеты вида `libgl1-mesa-dev libx11-dev libxcursor-dev libxrandr-dev
+libxinerama-dev libxi-dev` в Ubuntu/Debian):
+
+```bash
+go build -o mirage ./cmd/mirage   # тот же бинарник; без аргументов -> GUI
+./mirage gui                       # или явно: подкоманда gui
+```
+
+Fyne — только зависимость сборки под `GOOS=linux`; на Windows-кросс-сборку
+(см. выше) не влияет и не участвует в её линковке.
+
 ## Запуск (локальный тест)
 
 ```
