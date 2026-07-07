@@ -7,7 +7,10 @@ package main
 // обёртка начинает работать только с уже установленной сессией.
 
 import (
+	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -15,11 +18,20 @@ import (
 	"mirage/internal/protocol"
 )
 
-// dialSession устанавливает одно TCP-соединение до сервера, проводит
-// клиентское рукопожатие и оборачивает результат в *protocol.Session --
+type ClientSession interface {
+	Done() <-chan struct{}
+	Err() error
+	Close() error
+	Open(payload []byte) (io.ReadWriteCloser, error)
+	SendDatagram(payload []byte) error
+	ReceiveDatagram() ([]byte, error)
+}
+
+// dialSessionTCP устанавливает одно TCP-соединение до сервера, проводит
+// клиентское рукопожатие и оборачивает результат в ClientSession --
 // используется и для самого первого коннекта (CLI, оба GUI), и как
 // dial-замыкание для sessionHolder при переподключении.
-func dialSession(server string, pub, psk []byte, sni string, padding bool) (*protocol.Session, error) {
+func dialSessionTCP(server string, pub, psk []byte, sni string, padding bool) (ClientSession, error) {
 	up, err := net.DialTimeout("tcp", server, 10*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("dial server: %w", err)
@@ -35,24 +47,40 @@ func dialSession(server string, pub, psk []byte, sni string, padding bool) (*pro
 	if padding {
 		sess.StartPadding(1*time.Second, 5*time.Second, 32, 256)
 	}
-	return sess, nil
+	return tcpSession{sess}, nil
+}
+
+type tcpSession struct {
+	*protocol.Session
+}
+
+func (t tcpSession) Open(payload []byte) (io.ReadWriteCloser, error) {
+	return t.Session.Open(payload)
+}
+
+func (t tcpSession) SendDatagram(payload []byte) error {
+	return errors.New("datagrams not supported over TCP")
+}
+
+func (t tcpSession) ReceiveDatagram() ([]byte, error) {
+	return nil, errors.New("datagrams not supported over TCP")
 }
 
 type sessionHolder struct {
 	mu         sync.Mutex
-	sess       *protocol.Session // nil, пока идёт передозвон
-	dial       func() (*protocol.Session, error)
+	sess       ClientSession // nil, пока идёт передозвон
+	dial       func() (ClientSession, error)
 	onStatus   func(string)
 	minBackoff time.Duration
 	maxBackoff time.Duration
-	stopCh     chan struct{}
-	stopOnce   sync.Once
 
-	// onDialReturned -- тест-хук, nil в бою. Вызывается в run() сразу после
-	// успешного dial(), но ДО решения о публикации, чтобы тест мог
-	// детерминированно вклинить Stop() ровно в это окно (см.
-	// TestSessionHolderStopDuringDialDoesNotResurrectSession).
+	stopCh         chan struct{}
+	stopped        bool
 	onDialReturned func()
+
+	udpMap  map[uint32]chan []byte
+	udpNext uint32
+	stopOnce   sync.Once
 }
 
 // newSessionHolder запускает фоновую горутину, которая следит за initial и
@@ -60,7 +88,7 @@ type sessionHolder struct {
 // (minBackoff, удвоение, потолок maxBackoff), без ограничения по числу
 // попыток. onStatus вызывается на каждое изменение статуса (умерла сессия,
 // неудачная попытка, успешный реконнект); может быть nil.
-func newSessionHolder(initial *protocol.Session, dial func() (*protocol.Session, error), onStatus func(string), minBackoff, maxBackoff time.Duration) *sessionHolder {
+func newSessionHolder(initial ClientSession, dial func() (ClientSession, error), onStatus func(string), minBackoff, maxBackoff time.Duration) *sessionHolder {
 	if onStatus == nil {
 		onStatus = func(string) {}
 	}
@@ -77,12 +105,15 @@ func newSessionHolder(initial *protocol.Session, dial func() (*protocol.Session,
 		minBackoff: minBackoff,
 		maxBackoff: maxBackoff,
 		stopCh:     make(chan struct{}),
+		udpMap:     make(map[uint32]chan []byte),
+		udpNext:    1,
 	}
 	go h.run(initial)
 	return h
 }
 
-func (h *sessionHolder) run(sess *protocol.Session) {
+func (h *sessionHolder) run(sess ClientSession) {
+	go h.datagramLoop(sess)
 	for {
 		select {
 		case <-sess.Done():
@@ -134,20 +165,60 @@ func (h *sessionHolder) run(sess *protocol.Session) {
 				newSess.Close()
 				return
 			default:
+				sess = newSess
+				h.onStatus("reconnected")
+				go h.datagramLoop(sess)
 				h.sess = newSess
 				h.mu.Unlock()
 			}
-			h.onStatus("reconnected")
-			sess = newSess
 			break
 		}
 	}
 }
 
+func (h *sessionHolder) datagramLoop(sess ClientSession) {
+	for {
+		b, err := sess.ReceiveDatagram()
+		if err != nil {
+			return
+		}
+		if len(b) < 4 {
+			continue
+		}
+		id := binary.BigEndian.Uint32(b[:4])
+		h.mu.Lock()
+		ch := h.udpMap[id]
+		h.mu.Unlock()
+		if ch != nil {
+			// Не блокируемся, если канал переполнен (UDP lossy)
+			select {
+			case ch <- b[4:]:
+			default:
+			}
+		}
+	}
+}
+
+func (h *sessionHolder) RegisterUDP() (uint32, <-chan []byte) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	id := h.udpNext
+	h.udpNext++
+	ch := make(chan []byte, 64)
+	h.udpMap[id] = ch
+	return id, ch
+}
+
+func (h *sessionHolder) UnregisterUDP(id uint32) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.udpMap, id)
+}
+
 // Current возвращает текущую сессию, либо nil, если прямо сейчас идёт
 // передозвон -- вызывающий код (clientConn) должен сразу отказать новому
 // локальному подключению, а не ждать.
-func (h *sessionHolder) Current() *protocol.Session {
+func (h *sessionHolder) Current() ClientSession {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.sess

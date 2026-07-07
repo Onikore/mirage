@@ -10,34 +10,35 @@ import (
 	"strconv"
 )
 
-// Accept разбирает SOCKS5 CONNECT и возвращает host, port.
-func Accept(c net.Conn) (string, uint16, error) {
+// Accept разбирает SOCKS5 запрос и возвращает cmd, host, port.
+func Accept(c net.Conn) (byte, string, uint16, error) {
 	// greeting: ver, nmethods, methods...
 	head := make([]byte, 2)
 	if _, err := io.ReadFull(c, head); err != nil {
-		return "", 0, err
+		return 0, "", 0, err
 	}
 	if head[0] != 0x05 {
-		return "", 0, errors.New("socks: not v5")
+		return 0, "", 0, errors.New("socks: not v5")
 	}
 	methods := make([]byte, head[1])
 	if _, err := io.ReadFull(c, methods); err != nil {
-		return "", 0, err
+		return 0, "", 0, err
 	}
 	// no-auth
 	if _, err := c.Write([]byte{0x05, 0x00}); err != nil {
-		return "", 0, err
+		return 0, "", 0, err
 	}
 
 	// request: ver cmd rsv atyp ...
 	req := make([]byte, 4)
 	if _, err := io.ReadFull(c, req); err != nil {
-		return "", 0, err
+		return 0, "", 0, err
 	}
-	if req[1] != 0x01 { // CONNECT
+	if req[1] != 0x01 && req[1] != 0x03 { // CONNECT or UDP ASSOCIATE
 		c.Write([]byte{0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
-		return "", 0, errors.New("socks: only CONNECT")
+		return 0, "", 0, errors.New("socks: unsupported cmd")
 	}
+	cmd := req[1]
 
 	var host string
 	switch req[3] {
@@ -56,16 +57,30 @@ func Accept(c net.Conn) (string, uint16, error) {
 		io.ReadFull(c, b)
 		host = string(b)
 	default:
-		return "", 0, errors.New("socks: bad atyp")
+		return 0, "", 0, errors.New("socks: bad atyp")
 	}
 	pb := make([]byte, 2)
 	if _, err := io.ReadFull(c, pb); err != nil {
-		return "", 0, err
+		return 0, "", 0, err
 	}
 	port := binary.BigEndian.Uint16(pb)
 
-	// success reply (bind addr фиктивный)
-	c.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 	_ = strconv.Itoa
-	return host, port, nil
+	return cmd, host, port, nil
+}
+
+// SendSuccessReply отправляет SOCKS5 ответ об успешном выполнении с указанием привязанного IP и порта.
+func SendSuccessReply(c net.Conn, ip net.IP, port uint16) error {
+	rep := []byte{0x05, 0x00, 0x00, 0x01}
+	if ip4 := ip.To4(); ip4 != nil {
+		rep = append(rep, ip4...)
+	} else {
+		rep[3] = 0x04
+		rep = append(rep, ip.To16()...)
+	}
+	pb := make([]byte, 2)
+	binary.BigEndian.PutUint16(pb, port)
+	rep = append(rep, pb...)
+	_, err := c.Write(rep)
+	return err
 }

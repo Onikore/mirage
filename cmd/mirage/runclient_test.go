@@ -17,8 +17,8 @@ func TestRunClientListenerReturnsWhenListenerClosed(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 	c1, _ := net.Pipe()
-	sess := protocol.NewSession(c1)
-	h := newSessionHolder(sess, func() (*protocol.Session, error) {
+	sess := tcpSession{protocol.NewSession(c1)}
+	h := newSessionHolder(sess, func() (ClientSession, error) {
 		return nil, errors.New("dial should not be called in this test")
 	}, nil, time.Millisecond, time.Millisecond)
 	defer h.Stop()
