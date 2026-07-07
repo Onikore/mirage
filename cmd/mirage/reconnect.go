@@ -58,6 +58,12 @@ func newSessionHolder(initial *protocol.Session, dial func() (*protocol.Session,
 	if onStatus == nil {
 		onStatus = func(string) {}
 	}
+	if minBackoff <= 0 {
+		// Защитный минимум: backoff==0 превратил бы time.After(0) в
+		// busy-loop при повторных неудачах dial(). Реальные вызовы передают
+		// 1s, так что это лишь дешёвая страховка.
+		minBackoff = time.Millisecond
+	}
 	h := &sessionHolder{
 		sess:       initial,
 		dial:       dial,
@@ -101,19 +107,26 @@ func (h *sessionHolder) run(sess *protocol.Session) {
 				continue
 			}
 
+			// Проверка stop и публикация должны быть одной критической
+			// секцией: закрытие stopCh в Stop() happens-before захвата этого
+			// mu, поэтому select под замком гарантированно увидит его закрытым
+			// и откажется публиковать. Если бы это были две отдельные секции,
+			// Stop() мог бы вклиниться между ними, прочитать h.sess==nil и
+			// ничего не закрыть, после чего run() опубликовал бы живую, но уже
+			// никем не отслеживаемую сессию -- утечка.
+			h.mu.Lock()
 			select {
 			case <-h.stopCh:
+				h.mu.Unlock()
 				// Disconnect случился, пока шёл dial() -- закрыть только
 				// что установленную сессию и выйти, не публикуя её (Stop()
 				// не блокируется на dial(), см. Global Constraints).
 				newSess.Close()
 				return
 			default:
+				h.sess = newSess
+				h.mu.Unlock()
 			}
-
-			h.mu.Lock()
-			h.sess = newSess
-			h.mu.Unlock()
 			h.onStatus("reconnected")
 			sess = newSess
 			break
