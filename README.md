@@ -15,9 +15,14 @@ flynn/noise (аудированная реализация Noise Protocol Framew
 
 ## Сборка
 
+Нужен Go 1.25+ (см. `go.mod`).
+
 ```
 go build -o mirage ./cmd/mirage
 ```
+
+Практическое руководство «кто, на какой ОС, что запускает» (сервер и
+клиент, Ubuntu и Windows, CLI и GUI) — см. `DEPLOY.md`.
 
 ### Windows GUI
 
