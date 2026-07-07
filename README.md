@@ -141,6 +141,17 @@ curl --socks5-hostname 127.0.0.1:1080 https://blocked.example/
     повторный `curl` сразу после — снова 200. То же поведение (тот же
     `runClientListener`/`sessionHolder`) вплетено в обе GUI (Windows/walk,
     Linux/Fyne), со статусом на UI-потоке каждого тулкита.
+13. QUIC Транспорт (Этап 1, флаг `-quic`): клиент и сервер могут общаться
+    по QUIC поверх UDP. Noise-рукопожатие выполняется в `stream0`, после
+    чего новые SOCKS-запросы используют нативные QUIC-стримы (заменяя
+    `mux.go`). Проверен loopback через `curl --socks5-hostname`.
+14. Salamander-обфускация (Этап 2): QUIC-пакеты полностью шифруются
+    с помощью ChaCha20Poly1305 (с использованием PSK). DPI видит только
+    совершенно случайный UDP-шум, нет ни Initial пакетов, ни открытых
+    Connection IDs. Обфускация прозрачна для QUIC.
+15. QUIC Datagrams (Этап 3): Полная поддержка SOCKS5 UDP Associate (для игр/DNS).
+    UDP-пакеты мультиплексируются через нативные QUIC-датаграммы с минимальными
+    накладными расходами.
 
 ## Как устроено
 
@@ -157,6 +168,12 @@ cmd/mirage/            — точка входа: CLI-подкоманды + Win
 internal/protocol/     — сам протокол: Noise-рукопожатие + TLS-камуфляж + AEAD-фреймы
 internal/socks/        — SOCKS5-вход клиента
 ```
+
+**`internal/transport/quic/`** (пакет `quic`)
+- `quic.go`       — обёртка над `quic-go` Listener и Dial, а также
+  `StreamConn` для интеграции `quic.Stream` с Noise-рукопожатием
+- `obfuscator.go` — Salamander-обфускация (ChaCha20Poly1305) поверх
+  сырых UDP-пакетов, чтобы скрыть QUIC-заголовки от DPI
 
 **`internal/protocol/`** (пакет `protocol`)
 - `crypto.go`     — набор примитивов (X25519 + AES-256-GCM + SHA-256) и
@@ -188,8 +205,8 @@ internal/socks/        — SOCKS5-вход клиента
   (`ratelimit.go`) и набор psk с ротацией (`pskset.go`) живут здесь же —
   это чисто CLI/server-оркестрация, не часть протокола
 - `ratelimit.go`   — per-IP token-bucket лимит попыток подключения
-- `pskset.go`      — набор одновременно валидных psk + горячая
-  перезагрузка списка по SIGHUP (ротация без остановки сервера)
+- `keyset.go`      — набор одновременно валидных ключей (psk и server_priv) + горячая
+  перезагрузка списков по SIGHUP (ротация без остановки сервера)
 - `gui_windows.go` — GUI-клиент (только Windows, walk): поля + Connect/
   Disconnect поверх того же `runClientListener`/`sessionHolder`, что и
   `mirage client`
@@ -204,21 +221,13 @@ internal/socks/        — SOCKS5-вход клиента
 
 ## Что дальше (по приоритету)
 
-1. **QUIC/HTTP3-план.** quic-go, датаграммы для UDP, стримы для TCP,
-   connection migration. Salamander-обфускация QUIC-заголовка. Крупная,
-   отдельная от остального работа — новый транспорт, не правка поверх
-   текущего TCP-ядра.
-2. **Reality-стиль ServerHello.** Заимствование настоящего сертификата у
-   `-dest` через проксирование живого handshake — нынешний ServerHello
-   спецификационно корректен, но статичен, не привязан к реальному
-   TLS-сайту.
-3. **Ротация `server_priv`.** Сейчас один статический ключ на всё время
-   жизни сервера; смена ключа при живых соединениях не реализована.
+2. ~~**Reality-стиль ServerHello.** Заимствование настоящего сертификата у
+   `-dest` через проксирование живого handshake.~~ (Сделано)
 
-Уже сделано: мультиплекс (mux.go), ClientHello- и ServerHello-камуфляж
+Уже сделано: Reality-стиль ServerHello (проксирование сертификата, интеграция в TLS ApplicationData), ротация `server_priv` без перезапуска (SIGHUP), мультиплекс (mux.go), ClientHello- и ServerHello-камуфляж
 (uTLS + см. servhello.go), операционная обвязка вокруг Noise-рукопожатия
-(rate-limit, анти-replay, ротация psk без остановки сервера) — см.
-camouflage.go, servhello.go, mux.go, ratelimit.go, replay.go, pskset.go.
+(rate-limit, анти-replay, ротация ключей без остановки сервера) — см.
+camouflage.go, servhello.go, mux.go, ratelimit.go, replay.go, keyset.go.
 Chameleon shaping тоже сделан (mux.go, флаг `-padding`), но осознанно
 скромно: общая обфускация тайминга/размеров случайными padding-кадрами, БЕЗ
 претензии на соответствие какому-то конкретному измеренному профилю трафика
@@ -232,13 +241,11 @@ Chameleon shaping тоже сделан (mux.go, флаг `-padding`), но ос
 
 ## Дисклеймер
 
-Ещё не боевой код: QUIC не сделан, `server_priv` не ротируется, ServerHello
-спецификационно корректен, но не Reality-уровня (не заимствует сертификат у
-реального сайта), padding — общая обфускация, не измеренный профиль
-конкретного протокола. Само рукопожатие теперь на полноценном Noise
-(flynn/noise), не самодельное, обе половины (ClientHello и ServerHello)
-замаскированы под TLS 1.3, несколько запросов идут по одной сессии
-(mux.go), есть защита от replay msg1 (replay.go), per-IP rate-limit
-(ratelimit.go) и ротация psk без остановки сервера (pskset.go) — но п. 1
-выше ещё не сделан. Для реального использования — форкать sing-box/xray и
-переиспользовать их обкатанные транспорт и Reality.
+Ещё не боевой код: не измерен профиль задержек и размеры ApplicationData после установки соединения. Все базовые архитектурные задачи выполнены: Reality-камуфляж реализован (заимствует сертификат у реального сайта, прячет Noise в TLS 1.3), QUIC реализован (с Salamander-обфускацией и Datagrams для UDP), ротация всех ключей на лету (psk, server_priv) готова, padding — общая обфускация.
+конкретного протокола. Само рукопожатие теперь на полноценном Noise (flynn/noise), не самодельное, обе половины
+(ClientHello и ServerHello) замаскированы под TLS 1.3, несколько запросов
+идут по одной сессии (mux.go для TCP, нативные стримы для QUIC), есть
+защита от replay msg1 (replay.go), per-IP rate-limit (ratelimit.go) и
+ротация psk/priv без остановки сервера (keyset.go). Для реального
+использования — форкать sing-box/xray и переиспользовать их обкатанные
+транспорт и Reality.

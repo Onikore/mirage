@@ -11,6 +11,20 @@ import (
 	"github.com/flynn/noise"
 )
 
+func dummyProxyDial() func() (net.Conn, error) {
+	return func() (net.Conn, error) {
+		c1, c2 := net.Pipe()
+		go func() {
+			defer c1.Close()
+			buf := make([]byte, 4096)
+			c1.Read(buf)
+			sh, _ := buildMimicServerHello(make([]byte, 32), make([]byte, 32), make([]byte, 16))
+			firstLen := 5 + int((uint16(sh[3])<<8)|uint16(sh[4])); c1.Write(sh[:firstLen])
+		}()
+		return c2, nil
+	}
+}
+
 func TestHandshakeRoundTrip(t *testing.T) {
 	serverKP, err := GenKeypair()
 	if err != nil {
@@ -31,7 +45,7 @@ func TestHandshakeRoundTrip(t *testing.T) {
 		clientCh <- clientResult{sc, err}
 	}()
 
-	serverSC, consumed, err := ServerHandshake(c2, serverKP, [][]byte{psk}, NewReplayCache(time.Minute))
+	serverSC, consumed, err := ServerHandshake(c2, []noise.DHKey{serverKP}, [][]byte{psk}, NewReplayCache(time.Minute), dummyProxyDial())
 	if err != nil {
 		t.Fatalf("serverHandshake: %v (consumed %d bytes)", err, len(consumed))
 	}
@@ -79,7 +93,7 @@ func TestServerHandshakeRejectsBadPSK(t *testing.T) {
 		close(done)
 	}()
 
-	_, consumed, err := ServerHandshake(c2, serverKP, [][]byte{goodPSK}, NewReplayCache(time.Minute))
+	_, consumed, err := ServerHandshake(c2, []noise.DHKey{serverKP}, [][]byte{goodPSK}, NewReplayCache(time.Minute), dummyProxyDial())
 	if err == nil {
 		t.Fatal("expected error for bad psk")
 	}
@@ -121,10 +135,10 @@ func TestServerHandshakeRejectsReplay(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		c1.Write(mimic)
-		parseMimicServerHello(c1) // разблокировать conn.Write(mimic2) на сервере
+		parseRealityServerHello(c1) // разблокировать conn.Write(mimic2) на сервере
 		close(done)
 	}()
-	if _, _, err := ServerHandshake(c2, serverKP, [][]byte{psk}, rc); err != nil {
+	if _, _, err := ServerHandshake(c2, []noise.DHKey{serverKP}, [][]byte{psk}, rc, dummyProxyDial()); err != nil {
 		t.Fatalf("first attempt: expected success, got %v", err)
 	}
 	c1.Close()
@@ -138,7 +152,7 @@ func TestServerHandshakeRejectsReplay(t *testing.T) {
 		c3.Write(mimic)
 		close(done2)
 	}()
-	_, consumed, err := ServerHandshake(c4, serverKP, [][]byte{psk}, rc)
+	_, consumed, err := ServerHandshake(c4, []noise.DHKey{serverKP}, [][]byte{psk}, rc, dummyProxyDial())
 	if err == nil {
 		t.Fatal("expected replay to be rejected")
 	}
@@ -170,7 +184,7 @@ func TestServerHandshakeAcceptsAnyConfiguredPSK(t *testing.T) {
 				clientCh <- err
 			}()
 
-			if _, _, err := ServerHandshake(c2, serverKP, psks, NewReplayCache(time.Minute)); err != nil {
+			if _, _, err := ServerHandshake(c2, []noise.DHKey{serverKP}, psks, NewReplayCache(time.Minute), dummyProxyDial()); err != nil {
 				t.Fatalf("serverHandshake: %v", err)
 			}
 			if err := <-clientCh; err != nil {
@@ -197,7 +211,7 @@ func TestServerHandshakeRejectsGarbage(t *testing.T) {
 		close(done)
 	}()
 
-	_, consumed, err := ServerHandshake(c2, serverKP, [][]byte{psk}, NewReplayCache(time.Minute))
+	_, consumed, err := ServerHandshake(c2, []noise.DHKey{serverKP}, [][]byte{psk}, NewReplayCache(time.Minute), dummyProxyDial())
 	if err == nil {
 		t.Fatal("expected error for garbage input")
 	}

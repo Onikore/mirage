@@ -180,3 +180,125 @@ func readContinuationRecord(r io.Reader) (tag2 []byte, err error) {
 	}
 	return tag2, nil
 }
+
+// proxyServerHello читает ServerHello от реального сайта, подменяет
+// key_share на наш esPub, а random[0:16] на наш tag2.
+func proxyServerHello(dest io.Reader, esPub, tag2 []byte) ([]byte, error) {
+	hdr := make([]byte, 5)
+	if _, err := io.ReadFull(dest, hdr); err != nil {
+		return nil, err
+	}
+	if hdr[0] != 0x16 {
+		return nil, errors.New("not a handshake record from dest")
+	}
+	n := binary.BigEndian.Uint16(hdr[3:5])
+	body := make([]byte, n)
+	if _, err := io.ReadFull(dest, body); err != nil {
+		return nil, err
+	}
+	if body[0] != 0x02 {
+		return nil, errors.New("not a ServerHello from dest")
+	}
+
+	pos := 4
+	if pos+2+32 > len(body) { return nil, errors.New("truncated ServerHello") }
+	pos += 2 // legacy_version
+
+	copy(body[pos:pos+16], tag2)
+	pos += 32 // random
+
+	if pos+1 > len(body) { return nil, errors.New("truncated ServerHello") }
+	sidLen := int(body[pos])
+	pos += 1 + sidLen
+
+	pos += 3 // cipher_suite + compression
+	if pos+2 > len(body) { return nil, errors.New("truncated ServerHello") }
+	extsLen := int(binary.BigEndian.Uint16(body[pos : pos+2]))
+	pos += 2
+
+	if pos+extsLen > len(body) { return nil, errors.New("truncated ServerHello") }
+	exts := body[pos : pos+extsLen]
+
+	foundKS := false
+	epos := 0
+	for epos+4 <= len(exts) {
+		etype := binary.BigEndian.Uint16(exts[epos : epos+2])
+		elen := int(binary.BigEndian.Uint16(exts[epos+2 : epos+4]))
+		if epos+4+elen > len(exts) { break }
+		if etype == extKeyShare {
+			ksData := exts[epos+4 : epos+4+elen]
+			if len(ksData) >= 4 {
+				group := binary.BigEndian.Uint16(ksData[0:2])
+				klen := int(binary.BigEndian.Uint16(ksData[2:4]))
+				if group == groupX25519 && klen == 32 && len(ksData) >= 4+32 {
+					copy(ksData[4:4+32], esPub)
+					foundKS = true
+				}
+			}
+		}
+		epos += 4 + elen
+	}
+	if !foundKS {
+		return nil, errors.New("no x25519 key_share in dest ServerHello")
+	}
+
+	record := make([]byte, 5+len(body))
+	copy(record, hdr)
+	copy(record[5:], body)
+	return record, nil
+}
+
+// parseRealityServerHello читает Reality-стиль ServerHello.
+func parseRealityServerHello(r io.Reader) (esPub, tag2 []byte, err error) {
+	hdr := make([]byte, 5)
+	if _, err := io.ReadFull(r, hdr); err != nil {
+		return nil, nil, err
+	}
+	if hdr[0] != 0x16 {
+		return nil, nil, errors.New("not a handshake record")
+	}
+	n := binary.BigEndian.Uint16(hdr[3:5])
+	body := make([]byte, n)
+	if _, err := io.ReadFull(r, body); err != nil {
+		return nil, nil, err
+	}
+	if body[0] != 0x02 {
+		return nil, nil, errors.New("not a ServerHello")
+	}
+
+	pos := 6 // type(1) + len(3) + version(2)
+	if pos+32 > len(body) { return nil, nil, errors.New("truncated ServerHello") }
+	tag2 = make([]byte, 16)
+	copy(tag2, body[pos:pos+16])
+	pos += 32
+
+	sidLen := int(body[pos])
+	pos += 1 + sidLen + 3
+	if pos+2 > len(body) { return nil, nil, errors.New("truncated ServerHello") }
+	extsLen := int(binary.BigEndian.Uint16(body[pos : pos+2]))
+	pos += 2
+	exts := body[pos : pos+extsLen]
+
+	epos := 0
+	for epos+4 <= len(exts) {
+		etype := binary.BigEndian.Uint16(exts[epos : epos+2])
+		elen := int(binary.BigEndian.Uint16(exts[epos+2 : epos+4]))
+		if epos+4+elen > len(exts) { break }
+		if etype == extKeyShare {
+			ksData := exts[epos+4 : epos+4+elen]
+			if len(ksData) >= 4 {
+				group := binary.BigEndian.Uint16(ksData[0:2])
+				klen := int(binary.BigEndian.Uint16(ksData[2:4]))
+				if group == groupX25519 && klen == 32 {
+					esPub = make([]byte, 32)
+					copy(esPub, ksData[4:4+32])
+				}
+			}
+		}
+		epos += 4 + elen
+	}
+	if esPub == nil {
+		return nil, nil, errors.New("no x25519 key_share found")
+	}
+	return esPub, tag2, nil
+}

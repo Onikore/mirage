@@ -21,8 +21,11 @@ package protocol
 //     + 16Б AEAD-тег).
 
 import (
+	"encoding/binary"
 	"errors"
+	"io"
 	"net"
+	"time"
 
 	"github.com/flynn/noise"
 )
@@ -62,7 +65,7 @@ func ClientHandshake(conn net.Conn, serverPub, psk []byte, sni string) (*SecureC
 		return nil, err
 	}
 
-	esPub, tag2, err := parseMimicServerHello(conn)
+	esPub, tag2, err := parseRealityServerHello(conn)
 	if err != nil {
 		return nil, errAuth
 	}
@@ -73,7 +76,9 @@ func ClientHandshake(conn net.Conn, serverPub, psk []byte, sni string) (*SecureC
 	}
 
 	// клиент пишет c2s, читает s2c
-	return newSecureConn(conn, csC2S, csS2C), nil
+	sc := newSecureConn(conn, csC2S, csS2C)
+	sc.tlsFraming = true
+	return sc, nil
 }
 
 // ServerHandshake пытается принять клиента. Всегда возвращает consumed —
@@ -83,21 +88,26 @@ func ClientHandshake(conn net.Conn, serverPub, psk []byte, sni string) (*SecureC
 // параллельно на время ротации. rc — общий на процесс анти-replay кэш
 // (см. replay.go); проверяется только после успешной аутентификации, чтобы
 // мусор его не засорял.
-func ServerHandshake(conn net.Conn, staticKP noise.DHKey, psks [][]byte, rc *ReplayCache) (sc *SecureConn, consumed []byte, err error) {
-	ecPub, tag1, sessionID, consumed, perr := parseMimicClientHello(conn)
+func ServerHandshake(conn net.Conn, kps []noise.DHKey, psks [][]byte, rc *ReplayCache, proxyDial func() (net.Conn, error)) (sc *SecureConn, consumed []byte, err error) {
+	ecPub, tag1, _, consumed, perr := parseMimicClientHello(conn)
 	if perr != nil {
 		return nil, consumed, perr
 	}
 	msg1 := append(append([]byte(nil), ecPub...), tag1...)
 
 	var hs *noise.HandshakeState
-	for _, psk := range psks {
-		candidate, herr := newHandshakeState(false, psk, staticKP, nil)
-		if herr != nil {
-			continue
+	for _, kp := range kps {
+		for _, psk := range psks {
+			candidate, herr := newHandshakeState(false, psk, kp, nil)
+			if herr != nil {
+				continue
+			}
+			if _, _, _, e := candidate.ReadMessage(nil, msg1); e == nil {
+				hs = candidate
+				break
+			}
 		}
-		if _, _, _, e := candidate.ReadMessage(nil, msg1); e == nil {
-			hs = candidate
+		if hs != nil {
 			break
 		}
 	}
@@ -113,14 +123,45 @@ func ServerHandshake(conn net.Conn, staticKP noise.DHKey, psks [][]byte, rc *Rep
 	if e != nil {
 		return nil, consumed, e
 	}
-	mimic2, e := buildMimicServerHello(sessionID, msg2[:32], msg2[32:48])
-	if e != nil {
-		return nil, consumed, e
+	esPub := msg2[:32]
+	tag2 := msg2[32:48]
+
+	destConn, err := proxyDial()
+	if err != nil {
+		return nil, consumed, err
 	}
-	if _, e := conn.Write(mimic2); e != nil {
-		return nil, consumed, e
+	defer destConn.Close()
+
+	destConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	if _, err := destConn.Write(consumed); err != nil {
+		return nil, consumed, err
 	}
 
-	// сервер читает c2s, пишет s2c
-	return newSecureConn(conn, csS2C, csC2S), consumed, nil
+	destConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	modHello, err := proxyServerHello(destConn, esPub, tag2)
+	if err != nil {
+		return nil, consumed, err
+	}
+	if _, err := conn.Write(modHello); err != nil {
+		return nil, consumed, err
+	}
+
+	destConn.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+	for {
+		hdr := make([]byte, 5)
+		if _, err := io.ReadFull(destConn, hdr); err != nil {
+			break
+		}
+		length := binary.BigEndian.Uint16(hdr[3:5])
+		body := make([]byte, length)
+		if _, err := io.ReadFull(destConn, body); err != nil {
+			break
+		}
+		conn.Write(hdr)
+		conn.Write(body)
+	}
+
+	sc = newSecureConn(conn, csS2C, csC2S)
+	sc.tlsFraming = true
+	return sc, consumed, nil
 }

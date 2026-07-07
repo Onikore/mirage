@@ -6,8 +6,9 @@ require (
 	fyne.io/fyne/v2 v2.7.4
 	github.com/flynn/noise v1.1.0
 	github.com/lxn/walk v0.0.0-20210112085537-c389da54e794
+	github.com/quic-go/quic-go v0.60.0
 	github.com/refraction-networking/utls v1.8.2
-	golang.org/x/crypto v0.36.0
+	golang.org/x/crypto v0.51.0
 	golang.org/x/time v0.15.0
 )
 
@@ -44,9 +45,9 @@ require (
 	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/yuin/goldmark v1.7.8 // indirect
 	golang.org/x/image v0.24.0 // indirect
-	golang.org/x/net v0.38.0 // indirect
-	golang.org/x/sys v0.31.0 // indirect
-	golang.org/x/text v0.23.0 // indirect
+	golang.org/x/net v0.55.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
 	gopkg.in/Knetic/govaluate.v3 v3.0.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

@@ -14,18 +14,18 @@ import (
 // Current()==nil mid-reconnect deterministically instead of racing timers.
 func TestSessionHolderReconnectsAfterDeath(t *testing.T) {
 	c1, c2 := net.Pipe()
-	sess1 := protocol.NewSession(c1)
+	sess1 := tcpSession{protocol.NewSession(c1)}
 
 	attemptStarted := make(chan struct{})
 	result := make(chan error)
 
-	dial := func() (*protocol.Session, error) {
+	dial := func() (ClientSession, error) {
 		attemptStarted <- struct{}{}
 		if err := <-result; err != nil {
 			return nil, err
 		}
 		nc1, _ := net.Pipe()
-		return protocol.NewSession(nc1), nil
+		return tcpSession{protocol.NewSession(nc1)}, nil
 	}
 
 	h := newSessionHolder(sess1, dial, nil, time.Millisecond, 5*time.Millisecond)
@@ -72,11 +72,11 @@ func TestSessionHolderReconnectsAfterDeath(t *testing.T) {
 // that a Stop during reconnect is honored and does not resurrect a session.
 func TestSessionHolderStopDuringDialDoesNotResurrectSession(t *testing.T) {
 	c1, c2 := net.Pipe()
-	sess1 := protocol.NewSession(c1)
+	sess1 := tcpSession{protocol.NewSession(c1)}
 
-	dial := func() (*protocol.Session, error) {
+	dial := func() (ClientSession, error) {
 		nc1, _ := net.Pipe()
-		return protocol.NewSession(nc1), nil
+		return tcpSession{protocol.NewSession(nc1)}, nil
 	}
 
 	h := newSessionHolder(sess1, dial, nil, time.Millisecond, time.Millisecond)

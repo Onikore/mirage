@@ -12,7 +12,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -28,6 +30,7 @@ import (
 
 	"mirage/internal/protocol"
 	"mirage/internal/socks"
+	mquic "mirage/internal/transport/quic"
 )
 
 func main() {
@@ -88,36 +91,73 @@ func relay(a, b io.ReadWriteCloser) {
 func cmdServer(args []string) {
 	fs := flag.NewFlagSet("server", flag.ExitOnError)
 	listen := fs.String("listen", ":8443", "listen address")
-	privHex := fs.String("priv", "", "server private key (hex)")
+	privHex := fs.String("priv", "", "server private key (hex), single-key mode")
+	privFile := fs.String("priv-file", "", "file with one hex priv key per line; supports multiple simultaneously-valid keys and SIGHUP reload")
 	pskHex := fs.String("psk", "", "pre-shared key (hex), single-key mode")
 	pskFile := fs.String("psk-file", "", "file with one hex psk per line; supports multiple simultaneously-valid keys and SIGHUP reload (for zero-downtime rotation)")
 	dest := fs.String("dest", "example.com:443", "fallback destination for probers")
 	padding := fs.Bool("padding", false, "add periodic random-size padding frames to obscure session timing/size patterns (generic obfuscation, not a precise protocol-profile match)")
+	quicMode := fs.Bool("quic", false, "use QUIC transport instead of TCP")
 	fs.Parse(args)
 
-	priv, err := protocol.DHKeyFromPriv(mustHex(*privHex))
-	if err != nil {
-		log.Fatal("bad priv: ", err)
-	}
+	privs := newPrivSet(loadInitialPrivs(*privHex, *privFile))
 	ps := newPSKSet(loadInitialPSKs(*pskHex, *pskFile))
-	if *pskFile != "" {
-		watchPSKFileReload(*pskFile, *pskHex, ps)
+	if *pskFile != "" || *privFile != "" {
+		watchKeyFilesReload(*pskFile, *pskHex, ps, *privFile, *privHex, privs)
 	}
 	rc := protocol.NewReplayCache(protocol.ReplayWindow)
 	il := newIPLimiter()
 
-	ln, err := net.Listen("tcp", *listen)
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Printf("server listening on %s (fallback -> %s)", *listen, *dest)
-	for {
-		c, err := ln.Accept()
+	if *quicMode {
+		log.Printf("server listening on %s (QUIC mode, fallback -> %s)", *listen, *dest)
+		qs, err := mquic.Listen(*listen, ps.Load)
 		if err != nil {
-			continue
+			log.Fatal(err)
 		}
-		go serveConn(c, priv, ps, *dest, rc, il, *padding)
+		for {
+			qc, err := qs.Accept(context.Background())
+			if err != nil {
+				continue
+			}
+			go serveQUICConn(qc, privs, ps, *dest, rc, il)
+		}
+	} else {
+		ln, err := net.Listen("tcp", *listen)
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Printf("server listening on %s (TCP mode, fallback -> %s)", *listen, *dest)
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				continue
+			}
+			go serveConn(c, privs, ps, *dest, rc, il, *padding)
+		}
 	}
+}
+
+// loadInitialPrivs объединяет -priv и -priv-file
+func loadInitialPrivs(privHex, privFile string) []noise.DHKey {
+	var keys []noise.DHKey
+	if privHex != "" {
+		dh, err := protocol.DHKeyFromPriv(mustHex(privHex))
+		if err != nil {
+			log.Fatal("bad priv: ", err)
+		}
+		keys = append(keys, dh)
+	}
+	if privFile != "" {
+		fileKeys, err := loadPrivFile(privFile)
+		if err != nil {
+			log.Fatal("priv-file: ", err)
+		}
+		keys = append(keys, fileKeys...)
+	}
+	if len(keys) == 0 {
+		log.Fatal("no priv configured: pass -priv and/or -priv-file")
+	}
+	return keys
 }
 
 // loadInitialPSKs объединяет -psk (если задан) и -psk-file (если задан) в
@@ -141,33 +181,47 @@ func loadInitialPSKs(pskHex, pskFile string) [][]byte {
 	return keys
 }
 
-// watchPSKFileReload перечитывает pskFile по SIGHUP и атомарно подменяет
-// набор в ps — старые соединения не рвутся, новые попытки видят
-// обновлённый список. -psk (если был задан) остаётся действующим при
-// каждой перезагрузке. Плохой файл при перезагрузке — старый набор
-// сохраняется, ошибка только логируется (не блокировать всех опечаткой).
-func watchPSKFileReload(pskFile, pskHex string, ps *pskSet) {
+// watchKeyFilesReload перечитывает pskFile и privFile по SIGHUP и атомарно подменяет
+// наборы.
+func watchKeyFilesReload(pskFile, pskHex string, ps *pskSet, privFile, privHex string, privs *privSet) {
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGHUP)
 	go func() {
 		for range sigs {
-			fileKeys, err := loadPSKFile(pskFile)
-			if err != nil {
-				log.Printf("psk-file reload failed, keeping current set: %v", err)
-				continue
+			if pskFile != "" {
+				fileKeys, err := loadPSKFile(pskFile)
+				if err != nil {
+					log.Printf("psk-file reload failed, keeping current set: %v", err)
+				} else {
+					var next [][]byte
+					if pskHex != "" {
+						next = append(next, mustHex(pskHex))
+					}
+					next = append(next, fileKeys...)
+					ps.Store(next)
+					log.Printf("psk-file reloaded: %d key(s) active", len(next))
+				}
 			}
-			var next [][]byte
-			if pskHex != "" {
-				next = append(next, mustHex(pskHex))
+			if privFile != "" {
+				fileKeys, err := loadPrivFile(privFile)
+				if err != nil {
+					log.Printf("priv-file reload failed, keeping current set: %v", err)
+				} else {
+					var next []noise.DHKey
+					if privHex != "" {
+						dh, _ := protocol.DHKeyFromPriv(mustHex(privHex))
+						next = append(next, dh)
+					}
+					next = append(next, fileKeys...)
+					privs.Store(next)
+					log.Printf("priv-file reloaded: %d key(s) active", len(next))
+				}
 			}
-			next = append(next, fileKeys...)
-			ps.Store(next)
-			log.Printf("psk-file reloaded: %d key(s) active", len(next))
 		}
 	}()
 }
 
-func serveConn(c net.Conn, priv noise.DHKey, ps *pskSet, dest string, rc *protocol.ReplayCache, il *ipLimiter, padding bool) {
+func serveConn(c net.Conn, privs *privSet, ps *pskSet, dest string, rc *protocol.ReplayCache, il *ipLimiter, padding bool) {
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(15 * time.Second))
 
@@ -181,7 +235,9 @@ func serveConn(c net.Conn, priv noise.DHKey, ps *pskSet, dest string, rc *protoc
 		return
 	}
 
-	sc, consumed, err := protocol.ServerHandshake(c, priv, ps.Load(), rc)
+	sc, consumed, err := protocol.ServerHandshake(c, privs.Load(), ps.Load(), rc, func() (net.Conn, error) {
+		return net.DialTimeout("tcp", dest, 5*time.Second)
+	})
 	if err != nil {
 		// зонд/мусор -> прозрачный проброс на реальный сайт, переигрывая прочитанное
 		fallback(c, consumed, dest)
@@ -246,6 +302,7 @@ func cmdClient(args []string) {
 	pskHex := fs.String("psk", "", "pre-shared key (hex)")
 	sni := fs.String("sni", "www.google.com", "SNI hostname to wear in the disguised ClientHello")
 	padding := fs.Bool("padding", false, "add periodic random-size padding frames to obscure session timing/size patterns (generic obfuscation, not a precise protocol-profile match)")
+	quicMode := fs.Bool("quic", false, "use QUIC transport instead of TCP")
 	fs.Parse(args)
 
 	pub := mustHex(*pubHex)
@@ -256,17 +313,21 @@ func cmdClient(args []string) {
 		log.Fatal(err)
 	}
 
+	dial := func() (ClientSession, error) {
+		if *quicMode {
+			return dialSessionQUIC(*server, pub, psk, *sni)
+		}
+		return dialSessionTCP(*server, pub, psk, *sni, *padding)
+	}
+
 	// Первый коннект остаётся fail-fast -- если сервер недоступен или
 	// рукопожатие не проходит уже при старте, процесс завершается сразу, а
 	// не поднимает SOCKS5 вслепую (см. design spec, Global Constraints).
-	sess, err := dialSession(*server, pub, psk, *sni, *padding)
+	sess, err := dial()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	dial := func() (*protocol.Session, error) {
-		return dialSession(*server, pub, psk, *sni, *padding)
-	}
 	h := newSessionHolder(sess, dial, func(s string) { log.Print(s) }, time.Second, 30*time.Second)
 
 	log.Printf("SOCKS5 on %s -> mirage %s (session established)", *listen, *server)
@@ -291,22 +352,74 @@ func runClientListener(ln net.Listener, h *sessionHolder) {
 
 func clientConn(c net.Conn, h *sessionHolder) {
 	defer c.Close()
-	host, port, err := socks.Accept(c)
+	cmd, host, port, err := socks.Accept(c)
 	if err != nil {
+		log.Printf("socks accept: %v", err)
 		return
 	}
 
 	sess := h.Current()
 	if sess == nil {
-		// Сессия прямо сейчас недоступна (идёт автопереподключение) --
-		// сразу отказать, не ждать (см. design spec).
 		return
 	}
 
-	st, err := sess.Open(socks.EncodeAddr(host, port))
-	if err != nil {
-		log.Printf("open stream: %v", err)
-		return
+	if cmd == 0x01 { // CONNECT
+		socks.SendSuccessReply(c, net.IPv4zero, 0)
+		st, err := sess.Open(socks.EncodeAddr(host, port))
+		if err != nil {
+			log.Printf("open stream: %v", err)
+			return
+		}
+		relay(st, c)
+	} else if cmd == 0x03 { // UDP ASSOCIATE
+		uaddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
+		if err != nil {
+			log.Printf("resolve udp: %v", err)
+			return
+		}
+		uln, err := net.ListenUDP("udp", uaddr)
+		if err != nil {
+			log.Printf("listen udp: %v", err)
+			return
+		}
+		defer uln.Close()
+
+		laddr := uln.LocalAddr().(*net.UDPAddr)
+		if err := socks.SendSuccessReply(c, laddr.IP, uint16(laddr.Port)); err != nil {
+			return
+		}
+
+		clientID, ch := h.RegisterUDP()
+		defer h.UnregisterUDP(clientID)
+
+		// Wait for TCP close to terminate UDP associate
+		go func() {
+			io.Copy(io.Discard, c)
+			uln.Close() // this unblocks the ReadFromUDP loop
+		}()
+
+		var clientAddr *net.UDPAddr
+		go func() {
+			for datagram := range ch {
+				if clientAddr != nil {
+					uln.WriteToUDP(datagram, clientAddr)
+				}
+			}
+		}()
+
+		buf := make([]byte, 2048)
+		for {
+			n, caddr, err := uln.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			clientAddr = caddr
+			out := make([]byte, 4+n)
+			binary.BigEndian.PutUint32(out, clientID)
+			copy(out[4:], buf[:n])
+			if current := h.Current(); current != nil {
+				current.SendDatagram(out)
+			}
+		}
 	}
-	relay(st, c)
 }
