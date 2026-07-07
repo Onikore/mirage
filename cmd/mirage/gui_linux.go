@@ -6,13 +6,13 @@ package main
 // же логика connect/disconnect, что и в gui_windows.go, но на
 // кроссплатформенном тулките — lxn/walk оборачивает Win32 напрямую и на
 // Linux не собирается в принципе. Переиспользует ровно тот же клиентский
-// код (runClientListener/clientConn в main.go), что и `mirage client` и
-// Windows GUI — ничего не дублирует.
+// код (runClientListener/clientConn в main.go) и то же автопереподключение
+// (sessionHolder в reconnect.go), что и `mirage client` и Windows GUI —
+// ничего не дублирует.
 
 import (
 	"encoding/hex"
 	"fmt"
-	"io"
 	"net"
 	"time"
 
@@ -51,9 +51,13 @@ func cmdGUI() {
 
 	var (
 		listener   net.Listener
-		sessConn   io.Closer // sc (SecureConn) — закрывает сессию на Disconnect
+		holder     *sessionHolder
 		connectBtn *widget.Button
 	)
+
+	setStatus := func(s string) {
+		fyne.Do(func() { status.SetText(s) })
+	}
 
 	connect := func() {
 		server, pubHex, pskHex, sni, listenAddr :=
@@ -76,26 +80,18 @@ func cmdGUI() {
 			return
 		}
 
-		up, err := net.DialTimeout("tcp", server, 10*time.Second)
+		sess, err := dialSession(server, pub, psk, sni, false)
 		if err != nil {
-			status.SetText("Dial error: " + err.Error())
+			status.SetText(err.Error())
 			ln.Close()
 			return
 		}
-		up.SetDeadline(time.Now().Add(15 * time.Second))
-		sc, err := protocol.ClientHandshake(up, pub, psk, sni)
-		if err != nil {
-			status.SetText("Handshake error: " + err.Error())
-			up.Close()
-			ln.Close()
-			return
-		}
-		up.SetDeadline(time.Time{})
-		sess := protocol.NewSession(sc)
 
 		listener = ln
-		sessConn = sc
-		go runClientListener(ln, sess)
+		holder = newSessionHolder(sess, func() (*protocol.Session, error) {
+			return dialSession(server, pub, psk, sni, false)
+		}, setStatus, 1*time.Second, 30*time.Second)
+		go runClientListener(ln, holder)
 
 		guiConfig{Server: server, Pub: pubHex, PSK: pskHex, SNI: sni, Listen: listenAddr}.save()
 
@@ -108,9 +104,9 @@ func cmdGUI() {
 			listener.Close()
 			listener = nil
 		}
-		if sessConn != nil {
-			sessConn.Close()
-			sessConn = nil
+		if holder != nil {
+			holder.Stop()
+			holder = nil
 		}
 		status.SetText("Idle")
 		connectBtn.SetText("Connect")

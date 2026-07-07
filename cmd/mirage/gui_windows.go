@@ -5,17 +5,17 @@ package main
 // gui_windows.go — минимальный GUI-клиент (как обычное VPN-приложение):
 // поля для сервера/ключей, кнопка Connect/Disconnect, статус. Только
 // Windows — github.com/lxn/walk оборачивает Win32 напрямую (без cgo), не
-// собирается на других GOOS в принципе, отсюда build tag. См. gui_other.go
-// для остальных платформ.
+// собирается на других GOOS в принципе. См. gui_linux.go (Fyne) и
+// gui_other.go для остальных платформ.
 //
 // Переиспользует ровно тот же клиентский код, что и `mirage client`
-// (runClientListener/clientConn в main.go) — GUI лишь запускает/
-// останавливает тот же слушатель по кнопке, ничего не дублирует.
+// (runClientListener/clientConn в main.go) и то же автопереподключение
+// (sessionHolder в reconnect.go) — GUI лишь запускает/останавливает тот же
+// слушатель по кнопке и показывает статус, ничего не дублирует.
 
 import (
 	"encoding/hex"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"time"
@@ -36,12 +36,17 @@ func cmdGUI() {
 	}
 
 	var (
+		mw                                                *walk.MainWindow
 		serverEdit, pubEdit, pskEdit, sniEdit, listenEdit *walk.LineEdit
 		connectBtn                                        *walk.PushButton
 		statusLbl                                         *walk.Label
 		listener                                          net.Listener
-		sessConn                                          io.Closer // sc (SecureConn) — закрывает сессию на Disconnect
+		holder                                            *sessionHolder
 	)
+
+	setStatus := func(s string) {
+		mw.Synchronize(func() { statusLbl.SetText(s) })
+	}
 
 	connect := func() {
 		server, pubHex, pskHex, sni, listenAddr :=
@@ -64,26 +69,18 @@ func cmdGUI() {
 			return
 		}
 
-		up, err := net.DialTimeout("tcp", server, 10*time.Second)
+		sess, err := dialSession(server, pub, psk, sni, false)
 		if err != nil {
-			statusLbl.SetText("Dial error: " + err.Error())
+			statusLbl.SetText(err.Error())
 			ln.Close()
 			return
 		}
-		up.SetDeadline(time.Now().Add(15 * time.Second))
-		sc, err := protocol.ClientHandshake(up, pub, psk, sni)
-		if err != nil {
-			statusLbl.SetText("Handshake error: " + err.Error())
-			up.Close()
-			ln.Close()
-			return
-		}
-		up.SetDeadline(time.Time{})
-		sess := protocol.NewSession(sc)
 
 		listener = ln
-		sessConn = sc
-		go runClientListener(ln, sess)
+		holder = newSessionHolder(sess, func() (*protocol.Session, error) {
+			return dialSession(server, pub, psk, sni, false)
+		}, setStatus, 1*time.Second, 30*time.Second)
+		go runClientListener(ln, holder)
 
 		guiConfig{Server: server, Pub: pubHex, PSK: pskHex, SNI: sni, Listen: listenAddr}.save()
 
@@ -96,20 +93,19 @@ func cmdGUI() {
 			listener.Close()
 			listener = nil
 		}
-		if sessConn != nil {
-			// закрывает sc -> readLoop сессии получает ошибку чтения и сам
-			// завершается (Session.Close нет — не нужен, см. mux.go)
-			sessConn.Close()
-			sessConn = nil
+		if holder != nil {
+			holder.Stop()
+			holder = nil
 		}
 		statusLbl.SetText("Idle")
 		connectBtn.SetText("Connect")
 	}
 
 	_, err := MainWindow{
-		Title:  "Mirage",
-		Size:   Size{Width: 440, Height: 300},
-		Layout: VBox{},
+		AssignTo: &mw,
+		Title:    "Mirage",
+		Size:     Size{Width: 440, Height: 300},
+		Layout:   VBox{},
 		Children: []Widget{
 			Composite{
 				Layout: Grid{Columns: 2},

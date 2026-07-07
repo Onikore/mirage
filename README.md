@@ -127,6 +127,15 @@ curl --socks5-hostname 127.0.0.1:1080 https://blocked.example/
     в прикладной поток. Bad-PSK и raw-probe fallback тоже перепроверены с
     `-padding` включённым, не задеты (padding стартует уже после успешного
     рукопожатия).
+12. Автопереподключение клиента (`sessionHolder`, reconnect.go): реальный
+    процесс `mirage client` против реального сервера — туннель работал
+    (`curl` через SOCKS5 → 200), сервер убит (клиент видит EOF на чтении),
+    лог клиента показал `session died: ... -- reconnecting`, несколько
+    попыток с растущей паузой, сервер поднят заново с теми же ключами/
+    портом → `reconnected`, без единого перезапуска клиентского процесса;
+    повторный `curl` сразу после — снова 200. То же поведение (тот же
+    `runClientListener`/`sessionHolder`) вплетено в обе GUI (Windows/walk,
+    Linux/Fyne), со статусом на UI-потоке каждого тулкита.
 
 ## Как устроено
 
@@ -176,10 +185,17 @@ internal/socks/        — SOCKS5-вход клиента
 - `ratelimit.go`   — per-IP token-bucket лимит попыток подключения
 - `pskset.go`      — набор одновременно валидных psk + горячая
   перезагрузка списка по SIGHUP (ротация без остановки сервера)
-- `gui_windows.go` — GUI-клиент (только Windows): поля + Connect/Disconnect
-  поверх того же `runClientListener`, что и `mirage client`
-- `gui_other.go`   — заглушка `cmdGUI` для не-Windows сборок
+- `gui_windows.go` — GUI-клиент (только Windows, walk): поля + Connect/
+  Disconnect поверх того же `runClientListener`/`sessionHolder`, что и
+  `mirage client`
+- `gui_linux.go`   — тот же GUI-клиент под Linux (Fyne) — см. «Сборка →
+  Linux GUI» выше
+- `gui_other.go`   — заглушка `cmdGUI` для остальных платформ
 - `guiconfig.go`   — сохранение/загрузка последних введённых в GUI полей
+- `reconnect.go`   — `dialSession` (первый коннект и передозвон — общий
+  код) и `sessionHolder`: автопереустановка клиентской сессии с растущей
+  паузой (1с → потолок 30с), если она умирает уже после установки;
+  используется и CLI-клиентом, и обеими GUI одинаково
 
 ## Что дальше (по приоритету)
 
