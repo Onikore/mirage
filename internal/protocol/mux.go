@@ -227,6 +227,28 @@ func (s *Session) shutdown(err error) {
 	s.mu.Unlock()
 }
 
+// Done возвращает канал, который закрывается, когда сессия умерла (обрыв
+// соединения, чтение вернуло ошибку) -- тот же сигнал, которым уже
+// пользуется внутренний shutdown().
+func (s *Session) Done() <-chan struct{} {
+	return s.closed
+}
+
+// Err возвращает причину закрытия сессии, либо nil, пока сессия жива.
+func (s *Session) Err() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closeErr
+}
+
+// Close закрывает базовое соединение сессии -- readLoop получит ошибку
+// чтения и сам вызовет shutdown() (безопасно вызывать даже после того,
+// как сессия уже умерла естественным путём -- shutdown() идемпотентен,
+// см. его собственную реализацию выше).
+func (s *Session) Close() error {
+	return s.conn.Close()
+}
+
 // writePadding отправляет один кадр-шум размера n. Содержимое (нули) не
 // имеет значения: writeFrame пишет в *SecureConn, а AEAD-шифротекст
 // неотличим от случайного независимо от plaintext -- пассивному

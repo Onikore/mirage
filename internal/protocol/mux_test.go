@@ -164,6 +164,46 @@ func TestStreamCloseYieldsEOF(t *testing.T) {
 	}
 }
 
+func TestSessionDoneAndErr(t *testing.T) {
+	c1, c2 := net.Pipe()
+	sess := NewSession(c1)
+
+	select {
+	case <-sess.Done():
+		t.Fatal("Done() closed before the session died")
+	default:
+	}
+	if err := sess.Err(); err != nil {
+		t.Fatalf("Err() should be nil while alive, got %v", err)
+	}
+
+	c2.Close()
+
+	select {
+	case <-sess.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Done() did not close after the underlying connection closed")
+	}
+	if sess.Err() == nil {
+		t.Fatal("Err() should be non-nil after the session died")
+	}
+}
+
+func TestSessionClose(t *testing.T) {
+	c1, _ := net.Pipe()
+	sess := NewSession(c1)
+
+	if err := sess.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	select {
+	case <-sess.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Done() did not close after Close()")
+	}
+}
+
 func TestPaddingFramesNeverReachApplicationStream(t *testing.T) {
 	c1, c2 := net.Pipe()
 	client := NewSession(c1)
