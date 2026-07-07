@@ -47,6 +47,12 @@ type sessionHolder struct {
 	maxBackoff time.Duration
 	stopCh     chan struct{}
 	stopOnce   sync.Once
+
+	// onDialReturned -- тест-хук, nil в бою. Вызывается в run() сразу после
+	// успешного dial(), но ДО решения о публикации, чтобы тест мог
+	// детерминированно вклинить Stop() ровно в это окно (см.
+	// TestSessionHolderStopDuringDialDoesNotResurrectSession).
+	onDialReturned func()
 }
 
 // newSessionHolder запускает фоновую горутину, которая следит за initial и
@@ -105,6 +111,10 @@ func (h *sessionHolder) run(sess *protocol.Session) {
 					backoff = h.maxBackoff
 				}
 				continue
+			}
+
+			if h.onDialReturned != nil {
+				h.onDialReturned()
 			}
 
 			// Проверка stop и публикация должны быть одной критической

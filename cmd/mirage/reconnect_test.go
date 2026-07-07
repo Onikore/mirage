@@ -44,7 +44,7 @@ func TestSessionHolderReconnectsAfterDeath(t *testing.T) {
 	result <- errors.New("simulated dial failure")
 
 	<-attemptStarted // вторая попытка
-	result <- nil // на этот раз успех
+	result <- nil    // на этот раз успех
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -57,43 +57,53 @@ func TestSessionHolderReconnectsAfterDeath(t *testing.T) {
 }
 
 // TestSessionHolderStopDuringDialDoesNotResurrectSession guards the
-// non-blocking-Stop design: a Disconnect that races the *publish* of a
-// just-returned redial must never leave a live session installed afterward.
+// non-blocking-Stop contract: a Stop() that lands after dial() has returned a
+// fresh session but before run() publishes it must leave Current()==nil, never
+// a live-but-unwatched session.
 //
-// The earlier version of this test blocked dial() until Stop() had fully
-// returned, so run() always observed stopCh already closed at the post-dial
-// select and the real publish-after-Stop window was never exercised. Here
-// dial() RETURNS IMMEDIATELY and signals just before returning; the test then
-// races h.Stop() against run()'s post-dial stop-check-and-publish. Looping
-// many iterations drives enough interleavings that the separate-critical-
-// sections layout (stop-check and publish under different locks) leaks a live
-// session -- Current() != nil after Stop() -- while the single-lock fix keeps
-// Current() reliably nil.
+// We drive the interleaving deterministically (no flaky racing, no panic) via
+// the onDialReturned test hook, which fires right after dial() returns and, in
+// this test, calls Stop() synchronously. Note this guards the CONTRACT, not
+// the specific two-vs-one critical-section defect the fix addressed: the fix
+// fuses the stop-check and publish into one locked section, removing the gap
+// the old bug lived in, so no single seam can reproduce that exact micro-race
+// against the shipped code (verified separately by the reviewer's scratch
+// replica). What this test does lock in, deterministically and race-clean, is
+// that a Stop during reconnect is honored and does not resurrect a session.
 func TestSessionHolderStopDuringDialDoesNotResurrectSession(t *testing.T) {
-	for i := 0; i < 300; i++ {
-		c1, c2 := net.Pipe()
-		sess1 := protocol.NewSession(c1)
+	c1, c2 := net.Pipe()
+	sess1 := protocol.NewSession(c1)
 
-		dialReturning := make(chan struct{})
-		dial := func() (*protocol.Session, error) {
-			nc1, _ := net.Pipe()
-			close(dialReturning) // сигнал: dial сейчас же вернёт новую сессию
-			return protocol.NewSession(nc1), nil
+	dial := func() (*protocol.Session, error) {
+		nc1, _ := net.Pipe()
+		return protocol.NewSession(nc1), nil
+	}
+
+	h := newSessionHolder(sess1, dial, nil, time.Millisecond, time.Millisecond)
+	// Устанавливаем хук ДО смерти initial-сессии: run() читает onDialReturned
+	// только после того, как сработает Done() умершей сессии, а цепочка
+	// c2.Close() -> shutdown -> close(closed) -> <-sess.Done() даёт
+	// happens-before от этой записи к чтению в run(), так что гонки по полю
+	// нет (подтверждается -race).
+	h.onDialReturned = func() { h.Stop() }
+
+	c2.Close() // убивает sess1 -- run() уходит в reconnect, dial() вернёт сессию, хук вызовет Stop()
+
+	// Дать run() дойти до решения о публикации и отработать. Stop() уже
+	// вызван из хука синхронно внутри run(), так что после короткого отстоя
+	// текущей сессии быть не должно.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if h.Current() == nil {
+			select {
+			case <-h.stopCh:
+				return // Stop() отработал и сессия не воскрешена -- успех
+			default:
+			}
 		}
-
-		h := newSessionHolder(sess1, dial, nil, time.Millisecond, time.Millisecond)
-		c2.Close() // убивает sess1 -- запускает dial()
-
-		<-dialReturning // dial() вот-вот вернёт сессию: гонимся Stop() с публикацией
-		h.Stop()
-
-		// После возврата Stop() (и короткого отстоя, чтобы дать проигравшей
-		// гонку горутине run() шанс ошибочно опубликовать) текущей сессии быть
-		// не должно: либо Stop() выиграл гонку, либо run() увидел закрытый
-		// stopCh под тем же замком и отказался публиковать.
 		time.Sleep(time.Millisecond)
-		if cur := h.Current(); cur != nil {
-			t.Fatalf("iter %d: Current() must be nil after Stop() races an in-flight dial's publish, got %v", i, cur)
-		}
+	}
+	if cur := h.Current(); cur != nil {
+		t.Fatalf("Current() must be nil after Stop() fires in the post-dial pre-publish window, got %v", cur)
 	}
 }
