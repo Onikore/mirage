@@ -57,31 +57,43 @@ func TestSessionHolderReconnectsAfterDeath(t *testing.T) {
 }
 
 // TestSessionHolderStopDuringDialDoesNotResurrectSession guards the
-// non-blocking-Stop design: Disconnect while a redial is in flight must not
-// let that redial's result become the current session afterward.
+// non-blocking-Stop design: a Disconnect that races the *publish* of a
+// just-returned redial must never leave a live session installed afterward.
+//
+// The earlier version of this test blocked dial() until Stop() had fully
+// returned, so run() always observed stopCh already closed at the post-dial
+// select and the real publish-after-Stop window was never exercised. Here
+// dial() RETURNS IMMEDIATELY and signals just before returning; the test then
+// races h.Stop() against run()'s post-dial stop-check-and-publish. Looping
+// many iterations drives enough interleavings that the separate-critical-
+// sections layout (stop-check and publish under different locks) leaks a live
+// session -- Current() != nil after Stop() -- while the single-lock fix keeps
+// Current() reliably nil.
 func TestSessionHolderStopDuringDialDoesNotResurrectSession(t *testing.T) {
-	c1, c2 := net.Pipe()
-	sess1 := protocol.NewSession(c1)
+	for i := 0; i < 300; i++ {
+		c1, c2 := net.Pipe()
+		sess1 := protocol.NewSession(c1)
 
-	dialStarted := make(chan struct{})
-	releaseDial := make(chan struct{})
+		dialReturning := make(chan struct{})
+		dial := func() (*protocol.Session, error) {
+			nc1, _ := net.Pipe()
+			close(dialReturning) // сигнал: dial сейчас же вернёт новую сессию
+			return protocol.NewSession(nc1), nil
+		}
 
-	dial := func() (*protocol.Session, error) {
-		close(dialStarted)
-		<-releaseDial
-		nc1, _ := net.Pipe()
-		return protocol.NewSession(nc1), nil
-	}
+		h := newSessionHolder(sess1, dial, nil, time.Millisecond, time.Millisecond)
+		c2.Close() // убивает sess1 -- запускает dial()
 
-	h := newSessionHolder(sess1, dial, nil, time.Millisecond, time.Millisecond)
-	c2.Close() // убивает sess1 -- запускает dial()
+		<-dialReturning // dial() вот-вот вернёт сессию: гонимся Stop() с публикацией
+		h.Stop()
 
-	<-dialStarted
-	h.Stop() // Disconnect ровно во время dial()
-	close(releaseDial) // теперь dial() вернёт успех
-
-	time.Sleep(20 * time.Millisecond) // дать run() шанс (ошибочно) установить сессию
-	if cur := h.Current(); cur != nil {
-		t.Fatalf("Current() should stay nil after Stop() during an in-flight dial, got %v", cur)
+		// После возврата Stop() (и короткого отстоя, чтобы дать проигравшей
+		// гонку горутине run() шанс ошибочно опубликовать) текущей сессии быть
+		// не должно: либо Stop() выиграл гонку, либо run() увидел закрытый
+		// stopCh под тем же замком и отказался публиковать.
+		time.Sleep(time.Millisecond)
+		if cur := h.Current(); cur != nil {
+			t.Fatalf("iter %d: Current() must be nil after Stop() races an in-flight dial's publish, got %v", i, cur)
+		}
 	}
 }
