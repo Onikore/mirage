@@ -34,6 +34,11 @@ import (
 )
 
 func main() {
+	if isPluginMode() {
+		runPluginMode()
+		return
+	}
+
 	// Без аргументов — сразу GUI: двойной клик по mirage-gui.exe из
 	// Проводника запускает процесс без аргументов, а у windowsgui-подсистемы
 	// нет консоли, чтобы показать usage — значит, ничего лучше не остаётся.
@@ -263,11 +268,20 @@ func serveConn(c net.Conn, privs *privSet, ps *pskSet, dest string, rc *protocol
 // и сшивает поток с ней. Одна горутина на стрим -- несколько запросов через
 // одну и ту же сессию обслуживаются параллельно.
 func serveStream(st *protocol.Stream, payload []byte, dest string) {
-	target, err := socks.ReadAddr(bytes.NewReader(payload))
-	if err != nil {
-		st.Close()
-		return
+	var target string
+	if pluginTarget != "" {
+		// В режиме серверного плагина весь расшифрованный трафик отправляется
+		// на SS_LOCAL_HOST:SS_LOCAL_PORT (т.е. на сам SS-сервер).
+		target = pluginTarget
+	} else {
+		var err error
+		target, err = socks.ReadAddr(bytes.NewReader(payload))
+		if err != nil {
+			st.Close()
+			return
+		}
 	}
+	
 	remote, err := net.DialTimeout("tcp", target, 10*time.Second)
 	if err != nil {
 		log.Printf("dial %s: %v", target, err)
@@ -353,6 +367,22 @@ func runClientListener(ln net.Listener, h *sessionHolder) {
 
 func clientConn(c net.Conn, h *sessionHolder) {
 	defer c.Close()
+
+	if pluginTarget == "transparent" {
+		sess := h.Current()
+		if sess == nil {
+			return
+		}
+		// Send an empty address or a dummy address because the SS Server handles targeting.
+		st, err := sess.Open([]byte{0}) // Minimal dummy payload
+		if err != nil {
+			log.Printf("open stream: %v", err)
+			return
+		}
+		relay(st, c)
+		return
+	}
+
 	cmd, host, port, err := socks.Accept(c)
 	if err != nil {
 		log.Printf("socks accept: %v", err)

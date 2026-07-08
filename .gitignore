@@ -1,3 +1,4 @@
 /mirage
 *.exe
 .superpowers/
+*.log
