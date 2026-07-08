@@ -113,6 +113,9 @@ func runPluginMode() {
 		if _, ok := pc.options["padding"]; ok {
 			args = append(args, "-padding")
 		}
+		if _, ok := pc.options["fragment"]; ok {
+			args = append(args, "-fragment")
+		}
 		
 		cmdClient(args)
 	}

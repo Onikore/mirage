@@ -69,7 +69,7 @@ func cmdGUI() {
 			return
 		}
 
-		sess, err := dialSessionTCP(server, pub, psk, sni, false)
+		sess, err := dialSessionTCP(server, pub, psk, sni, false, false)
 		if err != nil {
 			statusLbl.SetText(err.Error())
 			ln.Close()
@@ -78,7 +78,7 @@ func cmdGUI() {
 
 		listener = ln
 		holder = newSessionHolder(sess, func() (ClientSession, error) {
-			return dialSessionTCP(server, pub, psk, sni, false)
+			return dialSessionTCP(server, pub, psk, sni, false, false)
 		}, setStatus, 1*time.Second, 30*time.Second)
 		go runClientListener(ln, holder)
 

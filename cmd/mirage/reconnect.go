@@ -31,13 +31,19 @@ type ClientSession interface {
 // клиентское рукопожатие и оборачивает результат в ClientSession --
 // используется и для самого первого коннекта (CLI, оба GUI), и как
 // dial-замыкание для sessionHolder при переподключении.
-func dialSessionTCP(server string, pub, psk []byte, sni string, padding bool) (ClientSession, error) {
+func dialSessionTCP(server string, pub, psk []byte, sni string, padding, fragment bool) (ClientSession, error) {
 	up, err := net.DialTimeout("tcp", server, 10*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("dial server: %w", err)
 	}
 	up.SetDeadline(time.Now().Add(15 * time.Second))
-	sc, err := protocol.ClientHandshake(up, pub, psk, sni)
+	
+	var conn net.Conn = up
+	if fragment {
+		conn = protocol.NewFragmentedConn(conn)
+	}
+	
+	sc, err := protocol.ClientHandshake(conn, pub, psk, sni)
 	if err != nil {
 		up.Close()
 		return nil, fmt.Errorf("handshake: %w", err)
