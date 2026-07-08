@@ -240,6 +240,7 @@ func serveConn(c net.Conn, privs *privSet, ps *pskSet, dest string, rc *protocol
 	})
 	if err != nil {
 		// зонд/мусор -> прозрачный проброс на реальный сайт, переигрывая прочитанное
+		log.Printf("probe -> transparent proxy to %s (err: %v)", dest, err)
 		fallback(c, consumed, dest)
 		return
 	}
