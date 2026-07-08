@@ -23,6 +23,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -103,7 +104,12 @@ func cmdServer(args []string) {
 	dest := fs.String("dest", "example.com:443", "fallback destination for probers")
 	padding := fs.Bool("padding", false, "add periodic random-size padding frames to obscure session timing/size patterns (generic obfuscation, not a precise protocol-profile match)")
 	quicMode := fs.Bool("quic", false, "use QUIC transport instead of TCP")
+	apiAddr := fs.String("api", "", "HTTP API address for stats (e.g. 127.0.0.1:8080)")
 	fs.Parse(args)
+
+	if *apiAddr != "" {
+		go runStatsServer(*apiAddr)
+	}
 
 	privs := newPrivSet(loadInitialPrivs(*privHex, *privFile))
 	ps := newPSKSet(loadInitialPSKs(*pskHex, *pskFile))
@@ -245,10 +251,14 @@ func serveConn(c net.Conn, privs *privSet, ps *pskSet, dest string, rc *protocol
 	})
 	if err != nil {
 		// зонд/мусор -> прозрачный проброс на реальный сайт, переигрывая прочитанное
+		atomic.AddUint64(&statProbesRejected, 1)
 		log.Printf("probe -> transparent proxy to %s (err: %v)", dest, err)
 		fallback(c, consumed, dest)
 		return
 	}
+	
+	atomic.AddInt64(&statActiveConns, 1)
+	defer atomic.AddInt64(&statActiveConns, -1)
 	c.SetDeadline(time.Time{}) // снять дедлайн для установленной сессии
 
 	sess := protocol.NewSession(sc)
@@ -289,7 +299,7 @@ func serveStream(st *protocol.Stream, payload []byte, dest string) {
 		return
 	}
 	log.Printf("tunnel -> %s", target)
-	relay(st, remote)
+	relayStats(st, remote)
 }
 
 // fallback выдаёт зонду настоящий сайт: реиграет уже прочитанные байты и сшивает потоки.
@@ -317,6 +327,7 @@ func cmdClient(args []string) {
 	pskHex := fs.String("psk", "", "pre-shared key (hex)")
 	sni := fs.String("sni", "www.google.com", "SNI hostname to wear in the disguised ClientHello")
 	padding := fs.Bool("padding", false, "add periodic random-size padding frames to obscure session timing/size patterns (generic obfuscation, not a precise protocol-profile match)")
+	fragment := fs.Bool("fragment", false, "fragment the initial ClientHello to bypass DPI")
 	quicMode := fs.Bool("quic", false, "use QUIC transport instead of TCP")
 	fs.Parse(args)
 
@@ -332,7 +343,7 @@ func cmdClient(args []string) {
 		if *quicMode {
 			return dialSessionQUIC(*server, pub, psk, *sni)
 		}
-		return dialSessionTCP(*server, pub, psk, *sni, *padding)
+		return dialSessionTCP(*server, pub, psk, *sni, *padding, *fragment)
 	}
 
 	// Первый коннект остаётся fail-fast -- если сервер недоступен или
@@ -379,7 +390,7 @@ func clientConn(c net.Conn, h *sessionHolder) {
 			log.Printf("open stream: %v", err)
 			return
 		}
-		relay(st, c)
+		relayStats(st, c)
 		return
 	}
 
@@ -401,7 +412,7 @@ func clientConn(c net.Conn, h *sessionHolder) {
 			log.Printf("open stream: %v", err)
 			return
 		}
-		relay(st, c)
+		relayStats(st, c)
 	} else if cmd == 0x03 { // UDP ASSOCIATE
 		uaddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
 		if err != nil {
