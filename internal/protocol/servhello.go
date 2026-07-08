@@ -228,9 +228,8 @@ func proxyServerHello(dest io.Reader, esPub, tag2 []byte) ([]byte, error) {
 		if etype == extKeyShare {
 			ksData := exts[epos+4 : epos+4+elen]
 			if len(ksData) >= 4 {
-				group := binary.BigEndian.Uint16(ksData[0:2])
 				klen := int(binary.BigEndian.Uint16(ksData[2:4]))
-				if group == groupX25519 && klen == 32 && len(ksData) >= 4+32 {
+				if klen >= 32 && len(ksData) >= 4+klen {
 					copy(ksData[4:4+32], esPub)
 					foundKS = true
 				}
@@ -239,7 +238,7 @@ func proxyServerHello(dest io.Reader, esPub, tag2 []byte) ([]byte, error) {
 		epos += 4 + elen
 	}
 	if !foundKS {
-		return nil, errors.New("no x25519 key_share in dest ServerHello")
+		return nil, errors.New("no key_share (>=32 bytes) in dest ServerHello")
 	}
 
 	record := make([]byte, 5+len(body))
@@ -287,9 +286,8 @@ func parseRealityServerHello(r io.Reader) (esPub, tag2 []byte, err error) {
 		if etype == extKeyShare {
 			ksData := exts[epos+4 : epos+4+elen]
 			if len(ksData) >= 4 {
-				group := binary.BigEndian.Uint16(ksData[0:2])
 				klen := int(binary.BigEndian.Uint16(ksData[2:4]))
-				if group == groupX25519 && klen == 32 {
+				if klen >= 32 && len(ksData) >= 4+klen {
 					esPub = make([]byte, 32)
 					copy(esPub, ksData[4:4+32])
 				}
@@ -298,7 +296,7 @@ func parseRealityServerHello(r io.Reader) (esPub, tag2 []byte, err error) {
 		epos += 4 + elen
 	}
 	if esPub == nil {
-		return nil, nil, errors.New("no x25519 key_share found")
+		return nil, nil, errors.New("no key_share (>=32 bytes) found")
 	}
 	return esPub, tag2, nil
 }
