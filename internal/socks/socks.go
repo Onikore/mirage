@@ -1,13 +1,16 @@
 package socks
 
-// socks.go — минимальный SOCKS5 (no-auth, только CONNECT) как локальный вход клиента.
+// socks.go — минимальный SOCKS5 (no-auth) как локальный вход клиента.
+// Accept парсит и CONNECT, и UDP ASSOCIATE на уровне протокола, но
+// вызывающий код (clientConn в cmd/mirage/main.go) сейчас поддерживает
+// только CONNECT -- UDP ASSOCIATE отклоняется явным SOCKS5-ответом, а не
+// молча проксируется без защиты (см. main.go для причины).
 
 import (
 	"encoding/binary"
 	"errors"
 	"io"
 	"net"
-	"strconv"
 )
 
 // Accept разбирает SOCKS5 запрос и возвращает cmd, host, port.
@@ -65,7 +68,6 @@ func Accept(c net.Conn) (byte, string, uint16, error) {
 	}
 	port := binary.BigEndian.Uint16(pb)
 
-	_ = strconv.Itoa
 	return cmd, host, port, nil
 }
 

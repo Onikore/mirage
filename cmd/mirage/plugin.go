@@ -62,11 +62,11 @@ func runPluginMode() {
 
 	if pc.isServer {
 		log.Printf("Starting SIP003 Server Plugin on %s:%s", pc.remoteHost, pc.remotePort)
-		
-		// The SS Server is waiting at SS_LOCAL_HOST:SS_LOCAL_PORT. 
+
+		// The SS Server is waiting at SS_LOCAL_HOST:SS_LOCAL_PORT.
 		// We set pluginTarget to forward all streams to it.
 		pluginTarget = net.JoinHostPort(pc.localHost, pc.localPort)
-		
+
 		args := []string{
 			"-listen", net.JoinHostPort(pc.remoteHost, pc.remotePort),
 		}
@@ -85,15 +85,15 @@ func runPluginMode() {
 		if _, ok := pc.options["padding"]; ok {
 			args = append(args, "-padding")
 		}
-		
+
 		cmdServer(args)
 	} else {
 		log.Printf("Starting SIP003 Client Plugin on %s:%s", pc.localHost, pc.localPort)
-		
+
 		// The SS Client is connecting to SS_LOCAL_HOST:SS_LOCAL_PORT.
 		// We set pluginTarget so the client knows it's in transparent mode.
 		pluginTarget = "transparent"
-		
+
 		args := []string{
 			"-listen", net.JoinHostPort(pc.localHost, pc.localPort),
 			"-server", net.JoinHostPort(pc.remoteHost, pc.remotePort),
@@ -116,9 +116,7 @@ func runPluginMode() {
 		if _, ok := pc.options["fragment"]; ok {
 			args = append(args, "-fragment")
 		}
-		
+
 		cmdClient(args)
 	}
 }
-
-// proxyStream is handled by relay in main.go, so we can remove it.
