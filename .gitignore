@@ -2,3 +2,9 @@
 *.exe
 .superpowers/
 *.log
+.swarm/
+
+# key material must never be committed -- generate locally via `mirage keygen`
+keys*.txt
+*.key
+psks.txt
