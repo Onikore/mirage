@@ -20,10 +20,10 @@ import (
 const maxPlain = 16384
 
 type SecureConn struct {
-	conn net.Conn
-	wCS  *noise.CipherState
-	rCS  *noise.CipherState
-	rbuf []byte // остаток расшифрованного, ещё не отданный в Read
+	conn           net.Conn
+	wCS            *noise.CipherState
+	rCS            *noise.CipherState
+	rbuf           []byte // остаток расшифрованного, ещё не отданный в Read
 	tlsFraming     bool
 	seenValidFrame bool
 }
@@ -43,11 +43,11 @@ func (s *SecureConn) Write(p []byte) (int, error) {
 		if err != nil {
 			return total, err
 		}
-		
+
 		var frame []byte
 		if s.tlsFraming {
 			frame = make([]byte, 5+len(ct))
-			frame[0] = 0x17 // application_data
+			frame[0] = 0x17                 // application_data
 			frame[1], frame[2] = 0x03, 0x03 // TLS 1.2/1.3
 			binary.BigEndian.PutUint16(frame[3:5], uint16(len(ct)))
 			copy(frame[5:], ct)
@@ -56,7 +56,7 @@ func (s *SecureConn) Write(p []byte) (int, error) {
 			binary.BigEndian.PutUint16(frame[:2], uint16(len(ct)))
 			copy(frame[2:], ct)
 		}
-		
+
 		if _, err := s.conn.Write(frame); err != nil {
 			return total, err
 		}

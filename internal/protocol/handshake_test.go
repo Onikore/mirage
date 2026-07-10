@@ -19,7 +19,8 @@ func dummyProxyDial() func() (net.Conn, error) {
 			buf := make([]byte, 4096)
 			c1.Read(buf)
 			sh, _ := buildMimicServerHello(make([]byte, 32), make([]byte, 32), make([]byte, 16))
-			firstLen := 5 + int((uint16(sh[3])<<8)|uint16(sh[4])); c1.Write(sh[:firstLen])
+			firstLen := 5 + int((uint16(sh[3])<<8)|uint16(sh[4]))
+			c1.Write(sh[:firstLen])
 		}()
 		return c2, nil
 	}

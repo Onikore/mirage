@@ -201,22 +201,30 @@ func proxyServerHello(dest io.Reader, esPub, tag2 []byte) ([]byte, error) {
 	}
 
 	pos := 4
-	if pos+2+32 > len(body) { return nil, errors.New("truncated ServerHello") }
+	if pos+2+32 > len(body) {
+		return nil, errors.New("truncated ServerHello")
+	}
 	pos += 2 // legacy_version
 
 	copy(body[pos:pos+16], tag2)
 	pos += 32 // random
 
-	if pos+1 > len(body) { return nil, errors.New("truncated ServerHello") }
+	if pos+1 > len(body) {
+		return nil, errors.New("truncated ServerHello")
+	}
 	sidLen := int(body[pos])
 	pos += 1 + sidLen
 
 	pos += 3 // cipher_suite + compression
-	if pos+2 > len(body) { return nil, errors.New("truncated ServerHello") }
+	if pos+2 > len(body) {
+		return nil, errors.New("truncated ServerHello")
+	}
 	extsLen := int(binary.BigEndian.Uint16(body[pos : pos+2]))
 	pos += 2
 
-	if pos+extsLen > len(body) { return nil, errors.New("truncated ServerHello") }
+	if pos+extsLen > len(body) {
+		return nil, errors.New("truncated ServerHello")
+	}
 	exts := body[pos : pos+extsLen]
 
 	foundKS := false
@@ -224,7 +232,9 @@ func proxyServerHello(dest io.Reader, esPub, tag2 []byte) ([]byte, error) {
 	for epos+4 <= len(exts) {
 		etype := binary.BigEndian.Uint16(exts[epos : epos+2])
 		elen := int(binary.BigEndian.Uint16(exts[epos+2 : epos+4]))
-		if epos+4+elen > len(exts) { break }
+		if epos+4+elen > len(exts) {
+			break
+		}
 		if etype == extKeyShare {
 			ksData := exts[epos+4 : epos+4+elen]
 			if len(ksData) >= 4 {
@@ -266,14 +276,18 @@ func parseRealityServerHello(r io.Reader) (esPub, tag2 []byte, err error) {
 	}
 
 	pos := 6 // type(1) + len(3) + version(2)
-	if pos+32 > len(body) { return nil, nil, errors.New("truncated ServerHello") }
+	if pos+32 > len(body) {
+		return nil, nil, errors.New("truncated ServerHello")
+	}
 	tag2 = make([]byte, 16)
 	copy(tag2, body[pos:pos+16])
 	pos += 32
 
 	sidLen := int(body[pos])
 	pos += 1 + sidLen + 3
-	if pos+2 > len(body) { return nil, nil, errors.New("truncated ServerHello") }
+	if pos+2 > len(body) {
+		return nil, nil, errors.New("truncated ServerHello")
+	}
 	extsLen := int(binary.BigEndian.Uint16(body[pos : pos+2]))
 	pos += 2
 	exts := body[pos : pos+extsLen]
@@ -282,7 +296,9 @@ func parseRealityServerHello(r io.Reader) (esPub, tag2 []byte, err error) {
 	for epos+4 <= len(exts) {
 		etype := binary.BigEndian.Uint16(exts[epos : epos+2])
 		elen := int(binary.BigEndian.Uint16(exts[epos+2 : epos+4]))
-		if epos+4+elen > len(exts) { break }
+		if epos+4+elen > len(exts) {
+			break
+		}
 		if etype == extKeyShare {
 			ksData := exts[epos+4 : epos+4+elen]
 			if len(ksData) >= 4 {

@@ -32,7 +32,7 @@ func NewFragmentedConn(c net.Conn) net.Conn {
 
 func (c *fragmentedConn) Write(b []byte) (n int, err error) {
 	if c.bytesWritten >= c.maxFragment {
-		// Optimization: if we already fragmented the beginning, 
+		// Optimization: if we already fragmented the beginning,
 		// just passthrough.
 		nn, err := c.Conn.Write(b)
 		c.bytesWritten += nn
