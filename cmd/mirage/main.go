@@ -14,7 +14,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"encoding/binary"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -256,7 +255,7 @@ func serveConn(c net.Conn, privs *privSet, ps *pskSet, dest string, rc *protocol
 		fallback(c, consumed, dest)
 		return
 	}
-	
+
 	atomic.AddInt64(&statActiveConns, 1)
 	defer atomic.AddInt64(&statActiveConns, -1)
 	c.SetDeadline(time.Time{}) // снять дедлайн для установленной сессии
@@ -291,7 +290,7 @@ func serveStream(st *protocol.Stream, payload []byte, dest string) {
 			return
 		}
 	}
-	
+
 	remote, err := net.DialTimeout("tcp", target, 10*time.Second)
 	if err != nil {
 		log.Printf("dial %s: %v", target, err)
@@ -405,63 +404,22 @@ func clientConn(c net.Conn, h *sessionHolder) {
 		return
 	}
 
-	if cmd == 0x01 { // CONNECT
-		socks.SendSuccessReply(c, net.IPv4zero, 0)
-		st, err := sess.Open(socks.EncodeAddr(host, port))
-		if err != nil {
-			log.Printf("open stream: %v", err)
-			return
-		}
-		relayStats(st, c)
-	} else if cmd == 0x03 { // UDP ASSOCIATE
-		uaddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
-		if err != nil {
-			log.Printf("resolve udp: %v", err)
-			return
-		}
-		uln, err := net.ListenUDP("udp", uaddr)
-		if err != nil {
-			log.Printf("listen udp: %v", err)
-			return
-		}
-		defer uln.Close()
-
-		laddr := uln.LocalAddr().(*net.UDPAddr)
-		if err := socks.SendSuccessReply(c, laddr.IP, uint16(laddr.Port)); err != nil {
-			return
-		}
-
-		clientID, ch := h.RegisterUDP()
-		defer h.UnregisterUDP(clientID)
-
-		// Wait for TCP close to terminate UDP associate
-		go func() {
-			io.Copy(io.Discard, c)
-			uln.Close() // this unblocks the ReadFromUDP loop
-		}()
-
-		var clientAddr *net.UDPAddr
-		go func() {
-			for datagram := range ch {
-				if clientAddr != nil {
-					uln.WriteToUDP(datagram, clientAddr)
-				}
-			}
-		}()
-
-		buf := make([]byte, 2048)
-		for {
-			n, caddr, err := uln.ReadFromUDP(buf)
-			if err != nil {
-				return
-			}
-			clientAddr = caddr
-			out := make([]byte, 4+n)
-			binary.BigEndian.PutUint32(out, clientID)
-			copy(out[4:], buf[:n])
-			if current := h.Current(); current != nil {
-				current.SendDatagram(out)
-			}
-		}
+	if cmd != 0x01 { // only CONNECT is supported
+		// UDP ASSOCIATE (0x03) is rejected cleanly rather than accepted and
+		// silently dropping every datagram: relaying UDP over the tunnel would
+		// need its own encrypted, loss-tolerant framing (github.com/flynn/noise's
+		// CipherState.Decrypt requires strictly-ordered, no-missing-messages
+		// delivery, which real UDP can't guarantee), and that hasn't been
+		// designed/reviewed yet.
+		c.Write([]byte{0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		return
 	}
+
+	socks.SendSuccessReply(c, net.IPv4zero, 0)
+	st, err := sess.Open(socks.EncodeAddr(host, port))
+	if err != nil {
+		log.Printf("open stream: %v", err)
+		return
+	}
+	relayStats(st, c)
 }

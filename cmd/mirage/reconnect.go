@@ -7,8 +7,6 @@ package main
 // обёртка начинает работать только с уже установленной сессией.
 
 import (
-	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -18,13 +16,17 @@ import (
 	"mirage/internal/protocol"
 )
 
+// ClientSession -- клиентская сессия поверх любого надёжного, упорядоченного
+// транспорта (TCP или один QUIC-стрим, см. dialSessionTCP/dialSessionQUIC).
+// Оба транспорта оборачиваются одинаково: protocol.NewSession поверх уже
+// прошедшего Noise-рукопожатие io.ReadWriteCloser, так что реальный
+// проксируемый трафик всегда защищён Noise-сессией, а не только
+// транспортным TLS/QUIC-шифрованием.
 type ClientSession interface {
 	Done() <-chan struct{}
 	Err() error
 	Close() error
 	Open(payload []byte) (io.ReadWriteCloser, error)
-	SendDatagram(payload []byte) error
-	ReceiveDatagram() ([]byte, error)
 }
 
 // dialSessionTCP устанавливает одно TCP-соединение до сервера, проводит
@@ -37,12 +39,12 @@ func dialSessionTCP(server string, pub, psk []byte, sni string, padding, fragmen
 		return nil, fmt.Errorf("dial server: %w", err)
 	}
 	up.SetDeadline(time.Now().Add(15 * time.Second))
-	
+
 	var conn net.Conn = up
 	if fragment {
 		conn = protocol.NewFragmentedConn(conn)
 	}
-	
+
 	sc, err := protocol.ClientHandshake(conn, pub, psk, sni)
 	if err != nil {
 		up.Close()
@@ -56,20 +58,17 @@ func dialSessionTCP(server string, pub, psk []byte, sni string, padding, fragmen
 	return tcpSession{sess}, nil
 }
 
+// tcpSession адаптирует *protocol.Session к ClientSession -- имя историческое
+// (осталось с TCP-only времён), но используется и для QUIC (dialSessionQUIC):
+// после рукопожатия оба транспорта одинаково передают всю сессию через
+// protocol.NewSession, разница только в том, что именно оборачивает Session
+// (сырой net.Conn для TCP, один QUIC-стрим для QUIC).
 type tcpSession struct {
 	*protocol.Session
 }
 
 func (t tcpSession) Open(payload []byte) (io.ReadWriteCloser, error) {
 	return t.Session.Open(payload)
-}
-
-func (t tcpSession) SendDatagram(payload []byte) error {
-	return errors.New("datagrams not supported over TCP")
-}
-
-func (t tcpSession) ReceiveDatagram() ([]byte, error) {
-	return nil, errors.New("datagrams not supported over TCP")
 }
 
 type sessionHolder struct {
@@ -81,12 +80,8 @@ type sessionHolder struct {
 	maxBackoff time.Duration
 
 	stopCh         chan struct{}
-	stopped        bool
 	onDialReturned func()
-
-	udpMap  map[uint32]chan []byte
-	udpNext uint32
-	stopOnce   sync.Once
+	stopOnce       sync.Once
 }
 
 // newSessionHolder запускает фоновую горутину, которая следит за initial и
@@ -111,15 +106,12 @@ func newSessionHolder(initial ClientSession, dial func() (ClientSession, error),
 		minBackoff: minBackoff,
 		maxBackoff: maxBackoff,
 		stopCh:     make(chan struct{}),
-		udpMap:     make(map[uint32]chan []byte),
-		udpNext:    1,
 	}
 	go h.run(initial)
 	return h
 }
 
 func (h *sessionHolder) run(sess ClientSession) {
-	go h.datagramLoop(sess)
 	for {
 		select {
 		case <-sess.Done():
@@ -173,52 +165,12 @@ func (h *sessionHolder) run(sess ClientSession) {
 			default:
 				sess = newSess
 				h.onStatus("reconnected")
-				go h.datagramLoop(sess)
 				h.sess = newSess
 				h.mu.Unlock()
 			}
 			break
 		}
 	}
-}
-
-func (h *sessionHolder) datagramLoop(sess ClientSession) {
-	for {
-		b, err := sess.ReceiveDatagram()
-		if err != nil {
-			return
-		}
-		if len(b) < 4 {
-			continue
-		}
-		id := binary.BigEndian.Uint32(b[:4])
-		h.mu.Lock()
-		ch := h.udpMap[id]
-		h.mu.Unlock()
-		if ch != nil {
-			// Не блокируемся, если канал переполнен (UDP lossy)
-			select {
-			case ch <- b[4:]:
-			default:
-			}
-		}
-	}
-}
-
-func (h *sessionHolder) RegisterUDP() (uint32, <-chan []byte) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	id := h.udpNext
-	h.udpNext++
-	ch := make(chan []byte, 64)
-	h.udpMap[id] = ch
-	return id, ch
-}
-
-func (h *sessionHolder) UnregisterUDP(id uint32) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	delete(h.udpMap, id)
 }
 
 // Current возвращает текущую сессию, либо nil, если прямо сейчас идёт

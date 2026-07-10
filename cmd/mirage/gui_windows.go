@@ -22,8 +22,6 @@ import (
 
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative"
-
-	"mirage/internal/protocol"
 )
 
 func cmdGUI() {

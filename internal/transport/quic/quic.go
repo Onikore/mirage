@@ -130,3 +130,12 @@ func (s *StreamConn) LocalAddr() net.Addr {
 func (s *StreamConn) RemoteAddr() net.Addr {
 	return s.qc.RemoteAddr()
 }
+
+// Close closes the whole underlying QUIC connection, not just this one
+// stream. StreamConn always wraps the single stream that carries an entire
+// mirage session (see cmd/mirage/quic_client.go, quic_server.go) -- closing
+// "the session's transport" must tear down the QUIC connection (and its UDP
+// socket) too, not just leave it dangling with one stream half-closed.
+func (s *StreamConn) Close() error {
+	return s.qc.CloseWithError(0, "")
+}
